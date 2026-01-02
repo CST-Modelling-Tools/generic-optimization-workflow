@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
@@ -33,11 +34,14 @@ def evaluate_candidate(
         ctx.update(context_override)
 
     ev = problem.evaluator
+
+    # Start from configured command
     cmd: List[str] = list(ev.command)
 
-    # Resolve relative path tokens in the command relative to the config file location (if available).
-    # We only rewrite tokens when the resolved path actually exists to avoid breaking things like
-    # "python", "mpirun", etc.
+    # Replace {python} placeholder with the current interpreter
+    cmd = [sys.executable if tok == "{python}" else tok for tok in cmd]
+
+    # Resolve relative path tokens relative to the config file location (if available)
     if problem.source_path is not None:
         base = problem.source_path.parent
         resolved: List[str] = []

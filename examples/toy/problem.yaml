@@ -23,7 +23,7 @@ parameters:
     choices: [a, b, c]
 
 evaluator:
-  command: ["python3", "../../tests/toy_eval.py"]
+  command: ["{python}", "../../tests/toy_eval.py"]
   timeout_s: 60
   env:
     OMP_NUM_THREADS: "1"
