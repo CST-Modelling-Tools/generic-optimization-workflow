@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import List, Optional
+from typing import Any, Dict, Iterable, Tuple
 
 import typer
 
 from gow.config import load_problem_config
 from gow.run import run_local_optimization
+
 
 app = typer.Typer(help="Generic Optimization Workflow (gow)")
 commands = typer.Typer(help="Commands")
@@ -43,6 +45,38 @@ def _parse_kv_params(items: List[str]) -> dict:
 
         out[k] = v
     return out
+
+def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def _pick_best(records: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """
+    Return records sorted by objective ascending (minimization).
+    Keeps only successful records with numeric objective.
+    """
+    good = []
+    for r in records:
+        fit = (r or {}).get("fitness", {}) or {}
+        if fit.get("status") != "ok":
+            continue
+        obj = fit.get("objective", None)
+        if obj is None:
+            continue
+        try:
+            obj_val = float(obj)
+        except (TypeError, ValueError):
+            continue
+        rr = dict(r)
+        rr["_objective"] = obj_val
+        good.append(rr)
+    good.sort(key=lambda x: x["_objective"])
+    return good
 
 @commands.command("run")
 def run_cmd(
@@ -104,6 +138,35 @@ def evaluate_cmd(
     if res.fitness.error:
         typer.echo(f"Error: {res.fitness.error}")
     typer.echo(f"Return code: {res.returncode}  Wall time (s): {res.wall_time_s:.3f}")
+
+@commands.command("best")
+def best_cmd(
+    run_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True, help="Run directory (contains results.jsonl)."),
+    top: int = typer.Option(1, "--top", "-n", min=1, help="Show top N candidates (by lowest objective)."),
+):
+    """
+    Show the best candidate(s) from a run directory produced by `gow run`.
+    """
+    results_path = run_dir / "results.jsonl"
+    if not results_path.exists():
+        raise typer.BadParameter(f"Could not find results.jsonl in {run_dir}")
+
+    ranked = _pick_best(_iter_jsonl(results_path))
+    if not ranked:
+        typer.echo("No successful candidates with an objective found.")
+        raise typer.Exit(code=1)
+
+    show = ranked[:top]
+
+    for i, r in enumerate(show, start=1):
+        fit = r["fitness"]
+        typer.echo(f"#{i}")
+        typer.echo(f"  candidate_id: {r.get('candidate_id')}")
+        typer.echo(f"  objective:    {fit.get('objective')}")
+        typer.echo(f"  metrics:      {fit.get('metrics')}")
+        typer.echo(f"  workdir:      {r.get('workdir')}")
+        if top > 1 and i != top:
+            typer.echo("")
 
 if __name__ == "__main__":
     app()
