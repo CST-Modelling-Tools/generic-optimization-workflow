@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 import typer
 
@@ -15,6 +14,7 @@ app = typer.Typer(help="Generic Optimization Workflow (gow)")
 commands = typer.Typer(help="Commands")
 
 app.add_typer(commands)
+
 
 def _parse_kv_params(items: List[str]) -> dict:
     """
@@ -46,6 +46,7 @@ def _parse_kv_params(items: List[str]) -> dict:
         out[k] = v
     return out
 
+
 def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -55,12 +56,19 @@ def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
             yield json.loads(line)
 
 
-def _pick_best(records: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
+def _pick_best(records: Iterable[Dict[str, Any]], *, direction: str = "minimize") -> list[Dict[str, Any]]:
     """
-    Return records sorted by objective ascending (minimization).
+    Return records sorted by objective according to direction.
     Keeps only successful records with numeric objective.
+
+    direction:
+      - "minimize": lower objective is better
+      - "maximize": higher objective is better
     """
-    good = []
+    if direction not in {"minimize", "maximize"}:
+        raise ValueError("direction must be 'minimize' or 'maximize'")
+
+    good: List[Dict[str, Any]] = []
     for r in records:
         fit = (r or {}).get("fitness", {}) or {}
         if fit.get("status") != "ok":
@@ -75,8 +83,11 @@ def _pick_best(records: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
         rr = dict(r)
         rr["_objective"] = obj_val
         good.append(rr)
-    good.sort(key=lambda x: x["_objective"])
+
+    reverse = (direction == "maximize")
+    good.sort(key=lambda x: x["_objective"], reverse=reverse)
     return good
+
 
 @commands.command("run")
 def run_cmd(
@@ -94,6 +105,7 @@ def run_cmd(
 def info():
     """Print basic installation info."""
     typer.echo("gow is installed and commands are registered correctly.")
+
 
 @commands.command("evaluate")
 def evaluate_cmd(
@@ -139,10 +151,13 @@ def evaluate_cmd(
         typer.echo(f"Error: {res.fitness.error}")
     typer.echo(f"Return code: {res.returncode}  Wall time (s): {res.wall_time_s:.3f}")
 
+
 @commands.command("best")
 def best_cmd(
     run_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True, help="Run directory (contains results.jsonl)."),
-    top: int = typer.Option(1, "--top", "-n", min=1, help="Show top N candidates (by lowest objective)."),
+    top: int = typer.Option(1, "--top", "-n", min=1, help="Show top N candidates."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Problem config (YAML/JSON) to read objective direction."),
+    direction: Optional[str] = typer.Option(None, "--direction", help="Override objective direction: minimize or maximize."),
 ):
     """
     Show the best candidate(s) from a run directory produced by `gow run`.
@@ -151,7 +166,18 @@ def best_cmd(
     if not results_path.exists():
         raise typer.BadParameter(f"Could not find results.jsonl in {run_dir}")
 
-    ranked = _pick_best(_iter_jsonl(results_path))
+    # Determine direction: CLI override > config > default
+    chosen_direction = "minimize"
+    if config is not None:
+        problem = load_problem_config(config)
+        chosen_direction = problem.objective.direction
+    if direction is not None:
+        direction = direction.strip().lower()
+        if direction not in {"minimize", "maximize"}:
+            raise typer.BadParameter("--direction must be 'minimize' or 'maximize'")
+        chosen_direction = direction
+
+    ranked = _pick_best(_iter_jsonl(results_path), direction=chosen_direction)
     if not ranked:
         typer.echo("No successful candidates with an objective found.")
         raise typer.Exit(code=1)
@@ -165,8 +191,11 @@ def best_cmd(
         typer.echo(f"  objective:    {fit.get('objective')}")
         typer.echo(f"  metrics:      {fit.get('metrics')}")
         typer.echo(f"  workdir:      {r.get('workdir')}")
+        if i == 1:
+            typer.echo(f"  direction:    {chosen_direction}")
         if top > 1 and i != top:
             typer.echo("")
+
 
 if __name__ == "__main__":
     app()

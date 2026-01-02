@@ -60,11 +60,27 @@ class ExternalEvaluatorConfig(BaseModel):
     command: List[str] = Field(
         ...,
         min_length=1,
-        description="Evaluator command as a list, e.g. ['python', 'path/to/eval.py'] or ['my_eval_exe']",
+        description="Evaluator command as a list, e.g. ['{python}', 'path/to/eval.py'] or ['my_eval_exe']",
     )
     timeout_s: int = Field(600, ge=1)
     extra_args: List[str] = Field(default_factory=list)
     env: Dict[str, str] = Field(default_factory=dict)
+
+
+# -------------------------
+# Objective configuration
+# -------------------------
+
+ObjectiveDirection = Literal["minimize", "maximize"]
+
+
+class ObjectiveConfig(BaseModel):
+    """
+    Objective configuration for selecting the best candidate.
+
+    - direction: whether lower ('minimize') or higher ('maximize') objective is better.
+    """
+    direction: ObjectiveDirection = Field("minimize")
 
 
 # -------------------------
@@ -93,6 +109,7 @@ class ProblemConfig(BaseModel):
     id: str = Field(..., description="Problem identifier, e.g. sunpos-mica or heliostat-optics.")
     parameters: Dict[str, Parameter]
     evaluator: ExternalEvaluatorConfig
+    objective: ObjectiveConfig = Field(default_factory=ObjectiveConfig)
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     context: Dict[str, Any] = Field(default_factory=dict, description="Problem-specific metadata.")
     source_path: Optional[Path] = Field(default=None, exclude=True)

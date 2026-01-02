@@ -38,6 +38,9 @@ def run_local_optimization(
     opt_cfg = problem.optimizer
     optimizer = make_optimizer(opt_cfg.name, seed=opt_cfg.seed)
 
+    direction = problem.objective.direction  # "minimize" or "maximize"
+    maximize = direction == "maximize"
+
     best = None  # store dict with objective + candidate_id + params
 
     n_done = 0
@@ -75,15 +78,30 @@ def run_local_optimization(
 
             fitness_dicts.append(fit)
 
-            # Update best (assumes smaller objective is better if present)
+            # Update best according to objective direction
             obj = fit.get("objective", None)
             if obj is not None and fit.get("status") == "ok":
-                if best is None or obj < best["objective"]:
+                if best is None:
                     best = {
                         "objective": obj,
                         "candidate_id": candidate_id,
                         "params": record["params"],
                     }
+                else:
+                    if maximize:
+                        if obj > best["objective"]:
+                            best = {
+                                "objective": obj,
+                                "candidate_id": candidate_id,
+                                "params": record["params"],
+                            }
+                    else:
+                        if obj < best["objective"]:
+                            best = {
+                                "objective": obj,
+                                "candidate_id": candidate_id,
+                                "params": record["params"],
+                            }
 
         optimizer.tell(candidates, fitness_dicts)
         n_done += n_batch
@@ -94,6 +112,7 @@ def run_local_optimization(
         "problem_id": problem.id,
         "run_id": run_id,
         "max_evaluations": opt_cfg.max_evaluations,
+        "objective": {"direction": direction},
         "best": best,
         "results_file": str(results_path),
     }

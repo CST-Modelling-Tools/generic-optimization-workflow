@@ -1,5 +1,8 @@
 {
   "id": "toy-sphere",
+  "objective": {
+    "direction": "minimize"
+  },
   "parameters": {
     "x": { "type": "real", "value": 0.1, "bounds": [-5.0, 5.0] },
     "y": { "type": "real", "value": -0.2, "bounds": [-5.0, 5.0] },

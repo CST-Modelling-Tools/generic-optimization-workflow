@@ -1,5 +1,8 @@
 id: toy-sphere
 
+objective:
+  direction: minimize
+
 parameters:
   x:
     type: real
