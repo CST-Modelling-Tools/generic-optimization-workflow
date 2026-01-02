@@ -20,6 +20,10 @@ dev = [
   "pytest>=8.0.0",
 ]
 
+fireworks = [
+  "FireWorks>=2.0.0",
+]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

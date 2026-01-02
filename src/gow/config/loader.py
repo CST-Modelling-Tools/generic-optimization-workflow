@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -18,6 +19,7 @@ def _load_data(path: Path) -> Any:
         return yaml.safe_load(path.read_text(encoding="utf-8"))
 
     raise ValueError(f"Unsupported config format: {path.suffix}")
+
 
 def load_problem_config(path: str | Path) -> ProblemConfig:
     path = Path(path)

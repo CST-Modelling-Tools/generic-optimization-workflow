@@ -29,7 +29,7 @@ class EvaluatorExecutionError(RuntimeError):
 
 def run_external_evaluator(
     *,
-    executable: str,
+    command: List[str],
     workdir: str | Path,
     run_id: str,
     candidate_id: str,
@@ -42,12 +42,15 @@ def run_external_evaluator(
     output_filename: str = "output.json",
 ) -> ExternalRunResult:
     """
-    Run an external evaluator executable following the contract:
-      <exe> --input input.json --output output.json
+    Run an external evaluator command following the contract:
+      <command...> --input input.json --output output.json
 
-    Writes input.json, runs the executable, captures stdout/stderr,
+    Writes input.json, runs the command, captures stdout/stderr,
     reads output.json into FitnessResult (or produces a failed FitnessResult on errors).
     """
+    if not command or not isinstance(command, list):
+        raise ValueError("command must be a non-empty list of strings")
+
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -64,7 +67,8 @@ def run_external_evaluator(
         context=context or {},
     )
 
-    cmd = [executable, "--input", input_filename, "--output", output_filename]
+    cmd = list(command)
+    cmd.extend(["--input", input_filename, "--output", output_filename])
     if extra_args:
         cmd.extend(extra_args)
 

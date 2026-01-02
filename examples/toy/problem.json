@@ -1,15 +1,15 @@
 {
   "id": "toy-sphere",
   "parameters": {
-    "x": {"type": "real", "value": 0.1, "bounds": [-5.0, 5.0]},
-    "y": {"type": "real", "value": -0.2, "bounds": [-5.0, 5.0]},
-    "n": {"type": "int", "value": 5, "bounds": [1, 10], "optimizable": false},
-    "mode": {"type": "categorical", "value": "a", "choices": ["a", "b", "c"]}
+    "x": { "type": "real", "value": 0.1, "bounds": [-5.0, 5.0] },
+    "y": { "type": "real", "value": -0.2, "bounds": [-5.0, 5.0] },
+    "n": { "type": "int", "value": 5, "bounds": [1, 10], "optimizable": false },
+    "mode": { "type": "categorical", "value": "a", "choices": ["a", "b", "c"] }
   },
   "evaluator": {
-    "executable": "/path/to/toy_eval",
+    "command": ["/path/to/toy_eval"],
     "timeout_s": 60,
-    "env": {"OMP_NUM_THREADS": "1"}
+    "env": { "OMP_NUM_THREADS": "1" }
   },
   "optimizer": {
     "name": "random_search",

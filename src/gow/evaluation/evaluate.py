@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from gow.config import ProblemConfig
 from gow.evaluator import ExternalRunResult, run_external_evaluator
@@ -33,19 +33,25 @@ def evaluate_candidate(
         ctx.update(context_override)
 
     ev = problem.evaluator
-    exe = ev.executable
+    cmd: List[str] = list(ev.command)
 
-    # If executable is a relative path, resolve it relative to the config file location
-    exe_path = Path(exe)
-    if not exe_path.is_absolute():
-        if problem.source_path is not None:
-            exe_path = (problem.source_path.parent / exe_path).resolve()
-        else:
-            exe_path = exe_path.resolve()
-
+    # Resolve relative path tokens in the command relative to the config file location (if available).
+    # We only rewrite tokens when the resolved path actually exists to avoid breaking things like
+    # "python", "mpirun", etc.
+    if problem.source_path is not None:
+        base = problem.source_path.parent
+        resolved: List[str] = []
+        for tok in cmd:
+            p = Path(tok)
+            if not p.is_absolute():
+                candidate = base / p
+                if candidate.exists():
+                    tok = str(candidate.resolve())
+            resolved.append(tok)
+        cmd = resolved
 
     return run_external_evaluator(
-        executable=str(exe_path),
+        command=cmd,
         workdir=workdir,
         run_id=run_id,
         candidate_id=candidate_id,

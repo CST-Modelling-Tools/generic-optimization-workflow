@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field
 from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Union
+
+from pydantic import BaseModel, Field
 
 
 # -------------------------
@@ -52,11 +53,15 @@ Parameter = Union[RealParam, IntParam, CategoricalParam]
 
 class ExternalEvaluatorConfig(BaseModel):
     """
-    External evaluator executable that follows the evaluator contract:
+    External evaluator command that follows the evaluator contract:
     - reads input.json
     - writes output.json
     """
-    executable: str = Field(..., description="Path to evaluator executable or name on PATH.")
+    command: List[str] = Field(
+        ...,
+        min_length=1,
+        description="Evaluator command as a list, e.g. ['python', 'path/to/eval.py'] or ['my_eval_exe']",
+    )
     timeout_s: int = Field(600, ge=1)
     extra_args: List[str] = Field(default_factory=list)
     env: Dict[str, str] = Field(default_factory=dict)
@@ -91,7 +96,6 @@ class ProblemConfig(BaseModel):
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     context: Dict[str, Any] = Field(default_factory=dict, description="Problem-specific metadata.")
     source_path: Optional[Path] = Field(default=None, exclude=True)
-
 
     def runtime_params(self) -> Dict[str, Any]:
         """
