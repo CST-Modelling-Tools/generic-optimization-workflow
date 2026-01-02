@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
+from pathlib import Path
 
 
 # -------------------------
@@ -89,6 +90,8 @@ class ProblemConfig(BaseModel):
     evaluator: ExternalEvaluatorConfig
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     context: Dict[str, Any] = Field(default_factory=dict, description="Problem-specific metadata.")
+    source_path: Optional[Path] = Field(default=None, exclude=True)
+
 
     def runtime_params(self) -> Dict[str, Any]:
         """

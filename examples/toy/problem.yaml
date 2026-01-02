@@ -23,7 +23,7 @@ parameters:
     choices: [a, b, c]
 
 evaluator:
-  executable: /path/to/toy_eval
+  executable: ../../tests/toy_eval.py
   timeout_s: 60
   env:
     OMP_NUM_THREADS: "1"

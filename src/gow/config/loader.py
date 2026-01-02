@@ -22,4 +22,6 @@ def _load_data(path: Path) -> Any:
 def load_problem_config(path: str | Path) -> ProblemConfig:
     path = Path(path)
     data = _load_data(path)
-    return ProblemConfig.model_validate(data)
+    cfg = ProblemConfig.model_validate(data)
+    cfg.source_path = path.resolve()
+    return cfg
