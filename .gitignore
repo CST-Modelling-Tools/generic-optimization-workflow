@@ -215,3 +215,6 @@ build-cpp/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
+
+# Runtime outputs / workflow runs
+runs/
