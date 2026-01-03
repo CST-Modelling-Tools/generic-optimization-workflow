@@ -12,8 +12,10 @@ from gow.run import run_local_optimization
 
 app = typer.Typer(help="Generic Optimization Workflow (gow)")
 commands = typer.Typer(help="Commands")
+fw_app = typer.Typer(help="FireWorks backend (optional)")
 
 app.add_typer(commands)
+app.add_typer(fw_app, name="fw")
 
 
 def _parse_kv_params(items: List[str]) -> dict:
@@ -196,6 +198,62 @@ def best_cmd(
         if top > 1 and i != top:
             typer.echo("")
 
+
+# -------------------------
+# FireWorks backend (safe mode: single eval)
+# -------------------------
+
+@fw_app.command("evaluate")
+def fw_evaluate_cmd(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to problem config (YAML/JSON)."),
+    launchpad: Optional[Path] = typer.Option(None, "--launchpad", help="Path to my_launchpad.yaml (FireWorks LaunchPad config)."),
+    outdir: Path = typer.Option(Path("runs"), "--outdir", "-o", help="Output directory for run artifacts."),
+    run_id: str = typer.Option("fw-manual", "--run-id", help="Run id used to build the workdir path."),
+    candidate_id: str = typer.Option("c000000", "--candidate-id", help="Candidate id used to build the workdir path."),
+    param: List[str] = typer.Option([], "--param", "-p", help="Override parameter as NAME=VALUE (repeatable)."),
+    params_file: Optional[Path] = typer.Option(None, "--params-file", help="JSON file with parameter overrides."),
+):
+    """
+    Submit a single-candidate evaluation workflow to FireWorks.
+    """
+    overrides: Dict[str, Any] = {}
+    if params_file is not None:
+        data = json.loads(params_file.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise typer.BadParameter("--params-file must contain a JSON object (dict).")
+        overrides.update(data)
+
+    overrides.update(_parse_kv_params(param))
+
+    # Lazy imports so `gow` works without FireWorks installed
+    try:
+        from gow.fw.launchpad import load_launchpad
+        from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
+    except RuntimeError as e:
+        raise typer.BadParameter(str(e)) from e
+
+    lp = load_launchpad(launchpad)
+
+    # IMPORTANT: store absolute paths in the FW spec so it works from launcher dirs
+    config_abs = config.expanduser().resolve()
+    outdir_abs = outdir.expanduser().resolve()
+
+    spec = SingleEvalSpec(
+        problem_config=config_abs,
+        outdir=outdir_abs,
+        run_id=run_id,
+        candidate_id=candidate_id,
+        candidate_params=overrides,
+    )
+    wf = build_single_evaluate_workflow(spec)
+
+    id_map = lp.add_wf(wf)
+    fw_id = None
+    if isinstance(id_map, dict):
+        fw_id = next(iter(id_map.values()), None)
+
+    typer.echo(f"Submitted workflow. id_map={id_map}  fw_id={fw_id}")
+    typer.echo(f"Run artifacts will appear under: {outdir_abs}")
 
 if __name__ == "__main__":
     app()
