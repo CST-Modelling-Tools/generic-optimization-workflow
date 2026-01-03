@@ -218,3 +218,5 @@ CMakeFiles/
 
 # Runtime outputs / workflow runs
 runs/
+
+results/
