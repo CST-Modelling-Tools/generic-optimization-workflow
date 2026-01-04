@@ -211,13 +211,3 @@ summary.json
 - Local and distributed execution share the same layout
 - FireWorks is optional
 
-----------------------------------------------------------------
-# 12. Next Steps
-----------------------------------------------------------------
-
-Recommended next steps for users:
-- Version control problem.yaml
-- Ignore results/ in git
-- Write custom evaluators
-- Extend optimizers
-- Post-process results.jsonl with pandas or jq
