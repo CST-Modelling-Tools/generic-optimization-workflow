@@ -9,6 +9,7 @@ from gow.candidate_ids import format_candidate_id
 from gow.config import ProblemConfig
 from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
+from gow.results.jsonl import append_jsonl_line
 
 
 def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
@@ -34,10 +35,6 @@ def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
 
 def _default_run_id() -> str:
     return str(uuid.uuid4())
-
-
-def _jsonl_dumps(obj: Dict[str, Any]) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def run_local_optimization(
@@ -116,12 +113,8 @@ def run_local_optimization(
                 "output_path": str(res.output_path),
             }
 
-            line = _jsonl_dumps(record)
-
-            with run_results_path.open("a", encoding="utf-8") as f:
-                f.write(line + "\n")
-            with problem_results_path.open("a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            append_jsonl_line(run_results_path, record)
+            append_jsonl_line(problem_results_path, record)
 
             fitness_dicts.append(fit)
 

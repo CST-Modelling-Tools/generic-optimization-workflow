@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from gow.config import load_problem_config
 from gow.evaluation import evaluate_candidate
 from gow.layout import candidate_workdir, run_root as run_root_dir
+from gow.results.jsonl import jsonl_dumps
 
 
 def _to_jsonable(obj: Any) -> Any:
@@ -21,15 +22,6 @@ def _to_jsonable(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_to_jsonable(v) for v in obj]
     return str(obj)
-
-
-def _jsonl_dumps(obj: Dict[str, Any]) -> str:
-    """
-    Deterministic JSON for JSONL:
-    - stable key ordering across platforms/backends
-    - compact representation
-    """
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def _ensure_fireworks_imports():
@@ -196,7 +188,7 @@ class AppendResultJsonlTask(FiretaskBase):
             if skip_if_exists and self._already_appended(results_path, run_id=run_id, candidate_id=candidate_id):
                 return False
             with results_path.open("a", encoding="utf-8") as f:
-                f.write(_jsonl_dumps(record) + "\n")
+                f.write(jsonl_dumps(record) + "\n")
         return True
 
     def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
