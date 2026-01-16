@@ -10,8 +10,33 @@ from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
 
 
+def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
+    if hasattr(opt_cfg, "model_dump"):
+        data = opt_cfg.model_dump()
+    elif hasattr(opt_cfg, "dict"):
+        data = opt_cfg.dict()
+    else:
+        data = dict(getattr(opt_cfg, "__dict__", {}) or {})
+
+    settings = data.get("settings") or {}
+    if not isinstance(settings, dict):
+        raise ValueError(f"optimizer.settings must be a dict, got {type(settings)}")
+
+    for k in ("name", "seed", "max_evaluations", "batch_size", "settings"):
+        data.pop(k, None)
+
+    out = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    out.update(settings)
+    out = {k: v for k, v in out.items() if not str(k).startswith("_")}
+    return out
+
+
 def _default_run_id() -> str:
     return str(uuid.uuid4())
+
+
+def _jsonl_dumps(obj: Dict[str, Any]) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def run_local_optimization(
@@ -20,66 +45,50 @@ def run_local_optimization(
     outdir: str | Path = "results",
     run_id: Optional[str] = None,
 ) -> Path:
-    """
-    Run a simple local optimization loop (no FireWorks).
-
-    Layout (A+B):
-      <outdir>/<problem_id>/
-        results/
-          results.jsonl
-          summary.json
-        runs/
-          <run_id>/
-            results.jsonl
-            summary.json
-            c000000/...
-            c000001/...
-            ...
-
-    Notes:
-      - We write both a run-scoped results.jsonl and a canonical problem-scoped results.jsonl.
-      - By default, the canonical problem-scoped results.jsonl APPENDS across runs.
-        If later you want "canonical == latest run only", we can switch to copying
-        run_results_path -> problem_results_path at the end.
-
-    Returns:
-      Path to <outdir>/<problem_id>/results/results.jsonl
-    """
     outdir = Path(outdir).expanduser().resolve()
     run_id_val = run_id or _default_run_id()
 
-    # Root per problem
-    problem_root = outdir / problem.id
-    results_root = problem_root / "results"
-    runs_root = problem_root / "runs"
-
-    # Root per run
+    runs_root = outdir / "runs"
     run_root = runs_root / run_id_val
 
-    results_root.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir(parents=True, exist_ok=True)
     run_root.mkdir(parents=True, exist_ok=True)
 
-    # Canonical (problem-level) + run-scoped files
-    problem_results_path = results_root / "results.jsonl"
+    problem_results_path = outdir / "results.jsonl"
     run_results_path = run_root / "results.jsonl"
 
     opt_cfg = problem.optimizer
-    optimizer = make_optimizer(opt_cfg.name, seed=opt_cfg.seed)
+    opt_kwargs = _optimizer_kwargs(opt_cfg)
 
-    direction = problem.objective.direction  # "minimize" or "maximize"
+    name_norm = str(opt_cfg.name).lower().strip()
+    if name_norm in {"differential_evolution", "de"}:
+        opt_kwargs.setdefault("population_size", opt_cfg.batch_size)
+        if opt_cfg.max_evaluations % opt_cfg.batch_size != 0:
+            raise ValueError(
+                "Differential Evolution requires max_evaluations to be a multiple of batch_size "
+                f"(got {opt_cfg.max_evaluations}, batch_size={opt_cfg.batch_size})"
+            )
+
+    optimizer = make_optimizer(opt_cfg.name, seed=opt_cfg.seed, **opt_kwargs)
+
+    direction = problem.objective.direction
     maximize = direction == "maximize"
 
-    best: Optional[Dict[str, Any]] = None  # objective + candidate_id + params
+    best: Optional[Dict[str, Any]] = None
 
     n_done = 0
     while n_done < opt_cfg.max_evaluations:
         n_batch = min(opt_cfg.batch_size, opt_cfg.max_evaluations - n_done)
+        generation_id = n_done // opt_cfg.batch_size
         candidates = optimizer.ask(problem, n_batch)
 
         fitness_dicts = []
         for i, cand in enumerate(candidates):
-            candidate_id = f"c{n_done + i:06d}"
+            candidate_index = n_done + i
+            candidate_id = f"g{generation_id:06d}_c{candidate_index:06d}"
+
             workdir = run_root / candidate_id
+            workdir.mkdir(parents=True, exist_ok=True)
 
             res = evaluate_candidate(
                 problem,
@@ -93,6 +102,7 @@ def run_local_optimization(
             record = {
                 "problem_id": problem.id,
                 "run_id": run_id_val,
+                "generation_id": generation_id,
                 "candidate_id": candidate_id,
                 "params": {**problem.runtime_params(), **cand},
                 "fitness": fit,
@@ -105,37 +115,27 @@ def run_local_optimization(
                 "output_path": str(res.output_path),
             }
 
-            line = json.dumps(record)
+            line = _jsonl_dumps(record)
 
-            # Append to run-scoped file
             with run_results_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
-
-            # Append to problem-scoped canonical file (history across runs)
             with problem_results_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
             fitness_dicts.append(fit)
 
-            # Update best according to objective direction
             obj = fit.get("objective", None)
             if obj is not None and fit.get("status") == "ok":
-                if best is None:
-                    best = {"objective": obj, "candidate_id": candidate_id, "params": record["params"]}
-                else:
-                    if maximize:
-                        if obj > best["objective"]:
-                            best = {"objective": obj, "candidate_id": candidate_id, "params": record["params"]}
-                    else:
-                        if obj < best["objective"]:
-                            best = {"objective": obj, "candidate_id": candidate_id, "params": record["params"]}
+                if best is None or (maximize and obj > best["objective"]) or (not maximize and obj < best["objective"]):
+                    best = {
+                        "objective": obj,
+                        "candidate_id": candidate_id,
+                        "generation_id": generation_id,
+                        "params": record["params"],
+                    }
 
         optimizer.tell(candidates, fitness_dicts)
         n_done += n_batch
-
-    # Summaries: run-scoped + canonical problem-scoped
-    run_summary_path = run_root / "summary.json"
-    problem_summary_path = results_root / "summary.json"
 
     summary = {
         "problem_id": problem.id,
@@ -146,9 +146,10 @@ def run_local_optimization(
         "results_file": str(problem_results_path),
         "run_results_file": str(run_results_path),
         "run_root": str(run_root),
+        "outdir": str(outdir),
     }
 
-    run_summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
-    problem_summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    (run_root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    (outdir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 
     return problem_results_path

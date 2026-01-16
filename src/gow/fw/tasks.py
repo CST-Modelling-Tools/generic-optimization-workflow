@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -8,10 +9,6 @@ from gow.evaluation import evaluate_candidate
 
 
 def _to_jsonable(obj: Any) -> Any:
-    """
-    Best-effort conversion to JSON-serializable values for FireWorks stored_data
-    and task parameters.
-    """
     if obj is None:
         return None
     if isinstance(obj, (str, int, float, bool)):
@@ -23,6 +20,15 @@ def _to_jsonable(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_to_jsonable(v) for v in obj]
     return str(obj)
+
+
+def _jsonl_dumps(obj: Dict[str, Any]) -> str:
+    """
+    Deterministic JSON for JSONL:
+    - stable key ordering across platforms/backends
+    - compact representation
+    """
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def _ensure_fireworks_imports():
@@ -48,74 +54,44 @@ from fireworks import FWAction, FiretaskBase, explicit_serialize  # type: ignore
 from filelock import FileLock  # type: ignore  # noqa: E402
 
 
-# -----------------------------------------------------------------------------
-# Path helpers
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Path helpers (flattened)
+# ---------------------------------------------------------------------
 
-def _problem_root(problem_root: Path) -> Path:
-    """
-    problem_root is already:
-      <base_results>/<problem_id>/
-    """
-    return problem_root
+def _runs_dir(outdir: Path) -> Path:
+    return outdir / "runs"
 
 
-def _results_dir(problem_root: Path) -> Path:
-    return _problem_root(problem_root) / "results"
+def _run_root(outdir: Path, run_id: str) -> Path:
+    return _runs_dir(outdir) / run_id
 
 
-def _runs_dir(problem_root: Path) -> Path:
-    return _problem_root(problem_root) / "runs"
+def _candidate_workdir(outdir: Path, run_id: str, candidate_id: str) -> Path:
+    return _run_root(outdir, run_id) / candidate_id
 
-
-def _run_root(problem_root: Path, run_id: str) -> Path:
-    return _runs_dir(problem_root) / run_id
-
-
-def _candidate_workdir(problem_root: Path, run_id: str, candidate_id: str) -> Path:
-    return _run_root(problem_root, run_id) / candidate_id
-
-
-# -----------------------------------------------------------------------------
-# Tasks
-# -----------------------------------------------------------------------------
 
 @explicit_serialize
 class EvaluateCandidateTask(FiretaskBase):
     """
-    FireWorks task that evaluates a single candidate using gow's evaluator pipeline.
+    Evaluate one candidate and write:
+      <outdir>/runs/<run_id>/<candidate_id>/{input.json,output.json,stdout.txt,stderr.txt,result.json}
 
-    IMPORTANT:
-      - `outdir` is the *problem root* directory:
-            <base_results>/<problem_id>/
-
-    Target layout:
-      <outdir>/
-        results/
-          results.jsonl
-          summary.json  (not written here)
-        runs/
-          <run_id>/<candidate_id>/{input.json,output.json,stdout.txt,stderr.txt,result.json}
+    `outdir` is the flattened problem root (same as CLI --outdir).
     """
-
     required_params = ["problem_config", "run_id", "candidate_id", "candidate_params", "outdir"]
     optional_params = ["context_override"]
 
     def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
-        import json
-
         problem_config = Path(self["problem_config"]).expanduser()
         run_id: str = self["run_id"]
         candidate_id: str = self["candidate_id"]
         candidate_params: Dict[str, Any] = dict(self["candidate_params"])
-        problem_root = Path(self["outdir"]).expanduser().resolve()
+        outdir = Path(self["outdir"]).expanduser().resolve()
         context_override: Optional[Dict[str, Any]] = self.get("context_override")
 
         problem = load_problem_config(problem_config)
 
-        # outdir is already <base_results>/<problem_id>
-        # so candidate workdir is <outdir>/runs/<run_id>/<candidate_id>/
-        workdir = _candidate_workdir(problem_root, run_id, candidate_id)
+        workdir = _candidate_workdir(outdir, run_id, candidate_id)
         workdir.mkdir(parents=True, exist_ok=True)
 
         res = evaluate_candidate(
@@ -154,13 +130,12 @@ class EvaluateCandidateTask(FiretaskBase):
 class AppendResultJsonlTask(FiretaskBase):
     """
     Append <workdir>/result.json as one line to:
-      1) <outdir>/results/results.jsonl                     (problem-level canonical file)
-      2) <outdir>/runs/<run_id>/results.jsonl               (optional convenience)
+      1) <outdir>/results.jsonl
+      2) <outdir>/runs/<run_id>/results.jsonl  (optional)
 
     Uses file locks to prevent corruption under parallel execution.
     Idempotent by candidate_id.
     """
-
     required_params = ["outdir", "problem_id", "run_id", "candidate_id"]
     optional_params = [
         "workdir",
@@ -168,7 +143,7 @@ class AppendResultJsonlTask(FiretaskBase):
         "results_filename",
         "lock_filename",
         "skip_if_exists",
-        "append_run_level",  # bool, default True
+        "append_run_level",
     ]
 
     def _already_appended(self, results_path: Path, candidate_id: str) -> bool:
@@ -179,7 +154,7 @@ class AppendResultJsonlTask(FiretaskBase):
                     if not line:
                         continue
                     try:
-                        obj = __import__("json").loads(line)
+                        obj = json.loads(line)
                     except Exception:
                         continue
                     if obj.get("candidate_id") == candidate_id:
@@ -201,14 +176,11 @@ class AppendResultJsonlTask(FiretaskBase):
             if skip_if_exists and self._already_appended(results_path, candidate_id):
                 return False
             with results_path.open("a", encoding="utf-8") as f:
-                f.write(__import__("json").dumps(record) + "\n")
+                f.write(_jsonl_dumps(record) + "\n")
         return True
 
     def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
-        import json
-
-        problem_root = Path(self["outdir"]).expanduser().resolve()
-        # problem_id is in params for bookkeeping/validation, but paths use problem_root directly
+        outdir = Path(self["outdir"]).expanduser().resolve()
         problem_id: str = self["problem_id"]
         run_id: str = self["run_id"]
         candidate_id: str = self["candidate_id"]
@@ -219,11 +191,10 @@ class AppendResultJsonlTask(FiretaskBase):
         skip_if_exists = bool(self.get("skip_if_exists", True))
         append_run_level = bool(self.get("append_run_level", True))
 
-        # Derive workdir if not explicitly passed
         if self.get("workdir"):
             workdir = Path(str(self["workdir"])).expanduser().resolve()
         else:
-            workdir = _candidate_workdir(problem_root, run_id, candidate_id)
+            workdir = _candidate_workdir(outdir, run_id, candidate_id)
 
         result_path = workdir / result_filename
         if not result_path.exists():
@@ -231,31 +202,28 @@ class AppendResultJsonlTask(FiretaskBase):
 
         record = json.loads(result_path.read_text(encoding="utf-8"))
 
-        # Basic sanity check: avoid mixing wrong problem roots
         rec_pid = record.get("problem_id")
         if rec_pid and rec_pid != problem_id:
             raise RuntimeError(
                 f"Record problem_id={rec_pid!r} does not match task problem_id={problem_id!r}"
             )
 
-        # Ensure directories exist
-        results_dir = _results_dir(problem_root)
-        results_dir.mkdir(parents=True, exist_ok=True)
+        outdir.mkdir(parents=True, exist_ok=True)
 
-        run_root = _run_root(problem_root, run_id)
+        run_root = _run_root(outdir, run_id)
         run_root.mkdir(parents=True, exist_ok=True)
 
-        # 1) problem-level canonical file
-        problem_results_path = results_dir / results_filename
-        problem_lock_path = results_dir / lock_filename
+        # 1) problem-level canonical file (flat)
+        problem_results_path = outdir / results_filename
+        problem_lock_path = outdir / lock_filename
         appended_problem = self._append_one(
             problem_results_path, problem_lock_path, record, candidate_id, skip_if_exists
         )
 
         # 2) per-run convenience file (optional)
-        appended_run = None
         run_results_path = run_root / results_filename
         run_lock_path = run_root / lock_filename
+        appended_run = None
         if append_run_level:
             appended_run = self._append_one(
                 run_results_path, run_lock_path, record, candidate_id, skip_if_exists

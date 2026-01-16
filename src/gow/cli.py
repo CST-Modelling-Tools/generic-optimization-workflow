@@ -1,3 +1,4 @@
+# src/gow/cli.py
 from __future__ import annotations
 
 import json
@@ -20,7 +21,6 @@ fw_app = typer.Typer(help="FireWorks backend (optional)")
 app.add_typer(commands)
 app.add_typer(fw_app, name="fw")
 
-
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
@@ -32,15 +32,20 @@ def _default_run_id() -> str:
     return str(uuid.uuid4())
 
 
-def _resolve_base_results_dir(config: Path, outdir: Optional[Path]) -> Path:
+def _resolve_results_dir(config: Path, outdir: Optional[Path]) -> Path:
     """
     Resolution order:
       1) explicit --outdir
       2) env var GOW_OUTDIR
       3) <config_dir>/results
 
-    IMPORTANT: this is the *base results directory*.
-    All outputs go under: <base>/<problem_id>/...
+    IMPORTANT: this is the flattened results directory (problem root).
+    Outputs go directly under:
+      <outdir>/
+        results.jsonl
+        summary.json
+        runs/...
+        launchers/...
     """
     if outdir is not None:
         return outdir.expanduser().resolve()
@@ -52,20 +57,16 @@ def _resolve_base_results_dir(config: Path, outdir: Optional[Path]) -> Path:
     return config.expanduser().resolve().parent / "results"
 
 
-def _problem_root(base_results: Path, problem_id: str) -> Path:
-    return base_results / problem_id
+def _run_root(outdir: Path, run_id: str) -> Path:
+    return outdir / "runs" / run_id
 
 
-def _run_root(base_results: Path, problem_id: str, run_id: str) -> Path:
-    return _problem_root(base_results, problem_id) / "runs" / run_id
+def _candidate_workdir(outdir: Path, run_id: str, candidate_id: str) -> Path:
+    return _run_root(outdir, run_id) / candidate_id
 
 
-def _candidate_workdir(base_results: Path, problem_id: str, run_id: str, candidate_id: str) -> Path:
-    return _run_root(base_results, problem_id, run_id) / candidate_id
-
-
-def _default_launchers_dir(base_results: Path, problem_id: str) -> Path:
-    return _problem_root(base_results, problem_id) / "launchers"
+def _default_launchers_dir(outdir: Path) -> Path:
+    return outdir / "launchers"
 
 
 def _parse_kv_params(items: List[str]) -> dict:
@@ -129,6 +130,41 @@ def _pick_best(records: Iterable[Dict[str, Any]], *, direction: str = "minimize"
     return good
 
 
+def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
+    """
+    Extract optimizer-specific kwargs from opt_cfg.
+
+    In GOW, optimizer hyperparameters are stored in opt_cfg.settings (dict).
+    This function flattens that dict and returns it as kwargs for make_optimizer().
+
+    Works with:
+      - Pydantic v2: model_dump()
+      - Pydantic v1: dict()
+      - simple objects: __dict__
+    """
+    if hasattr(opt_cfg, "model_dump"):
+        data = opt_cfg.model_dump()
+    elif hasattr(opt_cfg, "dict"):
+        data = opt_cfg.dict()
+    else:
+        data = dict(getattr(opt_cfg, "__dict__", {}) or {})
+
+    # Pull settings out and flatten them
+    settings = data.get("settings") or {}
+    if not isinstance(settings, dict):
+        raise ValueError(f"optimizer.settings must be a dict, got {type(settings)}")
+
+    # Drop known non-constructor fields
+    for k in ("name", "seed", "max_evaluations", "batch_size", "settings"):
+        data.pop(k, None)
+
+    # Merge: top-level extras (if any) + settings
+    # settings wins if same key appears twice
+    out = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    out.update(settings)
+    out = {k: v for k, v in out.items() if not str(k).startswith("_")}
+    return out
+
 @contextmanager
 def _pushd(path: Path):
     """
@@ -150,15 +186,14 @@ def _pushd(path: Path):
 
 @commands.command("run")
 def run_cmd(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to problem config (YAML/JSON)."),
+    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to optimization specs (YAML/JSON)."),
     outdir: Optional[Path] = typer.Option(
         None,
         "--outdir",
         "-o",
         help=(
-            "Base results directory. Resolution order: "
-            "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results. "
-            "Outputs go under <base>/<problem_id>/..."
+            "Results directory (flattened). Resolution order: "
+            "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results."
         ),
     ),
     run_id: str | None = typer.Option(None, "--run-id", help="Optional run id (defaults to a UUID)."),
@@ -167,15 +202,15 @@ def run_cmd(
     Run a local optimization loop (no FireWorks).
 
     Outputs:
-      <base>/<problem_id>/results.jsonl
-      <base>/<problem_id>/summary.json
-      <base>/<problem_id>/runs/<run_id>/c000000/...
+      <outdir>/results.jsonl
+      <outdir>/summary.json
+      <outdir>/runs/<run_id>/c000000/...
     """
     config_abs = config.expanduser().resolve()
-    base_results = _resolve_base_results_dir(config_abs, outdir)
+    results_dir = _resolve_results_dir(config_abs, outdir)
 
     problem = load_problem_config(config_abs)
-    results_path = run_local_optimization(problem, outdir=base_results, run_id=run_id)
+    results_path = run_local_optimization(problem, outdir=results_dir, run_id=run_id)
     typer.echo(f"Results: {results_path}")
 
 
@@ -186,15 +221,14 @@ def info():
 
 @commands.command("evaluate")
 def evaluate_cmd(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to problem config (YAML/JSON)."),
+    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to optimization specs (YAML/JSON)."),
     outdir: Optional[Path] = typer.Option(
         None,
         "--outdir",
         "-o",
         help=(
-            "Base results directory. Resolution order: "
-            "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results. "
-            "Artifacts go to <base>/<problem_id>/runs/..."
+            "Results directory (flattened). Resolution order: "
+            "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results."
         ),
     ),
     run_id: str = typer.Option("manual", "--run-id", help="Run id used to build the workdir path."),
@@ -206,7 +240,7 @@ def evaluate_cmd(
     Evaluate a single candidate (useful for debugging external evaluators).
     """
     config_abs = config.expanduser().resolve()
-    base_results = _resolve_base_results_dir(config_abs, outdir)
+    results_dir = _resolve_results_dir(config_abs, outdir)
 
     problem = load_problem_config(config_abs)
 
@@ -219,7 +253,7 @@ def evaluate_cmd(
 
     overrides.update(_parse_kv_params(param))
 
-    workdir = _candidate_workdir(base_results, problem.id, run_id, candidate_id)
+    workdir = _candidate_workdir(results_dir, run_id, candidate_id)
 
     from gow.evaluation import evaluate_candidate  # local import
 
@@ -242,24 +276,24 @@ def evaluate_cmd(
 
 @commands.command("best")
 def best_cmd(
-    problem_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True, help="Problem results dir (<base>/<problem_id>)."),
+    results_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True, help="Results dir (<outdir>)."),
     top: int = typer.Option(1, "--top", "-n", min=1, help="Show top N candidates."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Problem config (YAML/JSON) to read objective direction."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Optimization specs (YAML/JSON) to read objective direction."),
     direction: Optional[str] = typer.Option(None, "--direction", help="Override objective direction: minimize or maximize."),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="If set, read runs/<run_id>/results.jsonl instead of problem-level results.jsonl."),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="If set, read runs/<run_id>/results.jsonl instead of <outdir>/results.jsonl."),
 ):
     """
     Show the best candidate(s).
 
     Reads:
-      - <problem_dir>/results.jsonl (default), OR
-      - <problem_dir>/runs/<run_id>/results.jsonl if --run-id is provided.
+      - <outdir>/results.jsonl (default), OR
+      - <outdir>/runs/<run_id>/results.jsonl if --run-id is provided.
     """
-    problem_dir = problem_dir.expanduser().resolve()
+    results_dir = results_dir.expanduser().resolve()
     if run_id:
-        results_path = problem_dir / "runs" / run_id / "results.jsonl"
+        results_path = results_dir / "runs" / run_id / "results.jsonl"
     else:
-        results_path = problem_dir / "results.jsonl"
+        results_path = results_dir / "results.jsonl"
 
     if not results_path.exists():
         raise typer.BadParameter(f"Could not find results.jsonl at {results_path}")
@@ -299,16 +333,15 @@ def best_cmd(
 
 @fw_app.command("evaluate")
 def fw_evaluate_cmd(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to problem config (YAML/JSON)."),
+    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to optimization specs (YAML/JSON)."),
     launchpad: Optional[Path] = typer.Option(None, "--launchpad", help="Path to my_launchpad.yaml (FireWorks LaunchPad config)."),
     outdir: Optional[Path] = typer.Option(
         None,
         "--outdir",
         "-o",
         help=(
-            "Base results directory. Resolution order: "
-            "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results. "
-            "Outputs go under <base>/<problem_id>/..."
+            "Results directory (flattened). Resolution order: "
+            "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results."
         ),
     ),
     run_id: str = typer.Option("fw-manual", "--run-id", help="Run id used to build the workdir path."),
@@ -319,7 +352,7 @@ def fw_evaluate_cmd(
     launch_dir: Optional[Path] = typer.Option(
         None,
         "--launch-dir",
-        help="Directory to place FireWorks launcher_* dirs (default: <base>/<problem_id>/launchers).",
+        help="Directory to place FireWorks launcher_* dirs (default: <outdir>/launchers).",
     ),
     sleep: int = typer.Option(0, "--sleep", help="Seconds to sleep between rocket launches (rapidfire)."),
     nlaunches: int = typer.Option(0, "--nlaunches", help="Max launches for rapidfire (0 means until queue empty)."),
@@ -328,10 +361,10 @@ def fw_evaluate_cmd(
     Submit a single-candidate evaluation workflow to FireWorks (optionally launch).
 
     Outputs:
-      <base>/<problem_id>/runs/<run_id>/<candidate_id>/...
-      <base>/<problem_id>/results.jsonl
-      <base>/<problem_id>/runs/<run_id>/results.jsonl
-      <base>/<problem_id>/launchers/launcher_*   (default)
+      <outdir>/runs/<run_id>/<candidate_id>/...
+      <outdir>/results.jsonl
+      <outdir>/runs/<run_id>/results.jsonl
+      <outdir>/launchers/launcher_*   (default)
     """
     overrides: Dict[str, Any] = {}
     if params_file is not None:
@@ -351,16 +384,16 @@ def fw_evaluate_cmd(
         raise typer.BadParameter(str(e)) from e
 
     config_abs = config.expanduser().resolve()
-    base_results = _resolve_base_results_dir(config_abs, outdir)
+    results_dir = _resolve_results_dir(config_abs, outdir)
 
     problem = load_problem_config(config_abs)
-    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else _default_launchers_dir(base_results, problem.id))
+    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else _default_launchers_dir(results_dir))
 
     lp = load_launchpad(launchpad)
 
     spec = SingleEvalSpec(
         problem_config=config_abs,
-        outdir=base_results,  # <-- base results dir
+        outdir=results_dir,  # flattened
         run_id=run_id,
         candidate_id=candidate_id,
         candidate_params=overrides,
@@ -371,8 +404,7 @@ def fw_evaluate_cmd(
     fw_id = next(iter(id_map.values()), None) if isinstance(id_map, dict) else None
 
     typer.echo(f"Submitted workflow. id_map={id_map}  fw_id={fw_id}")
-    typer.echo(f"Base results: {base_results}")
-    typer.echo(f"Problem results dir: {_problem_root(base_results, problem.id)}")
+    typer.echo(f"Results dir: {results_dir}")
     typer.echo(f"Launchers dir: {launchers_dir}")
 
     if launch:
@@ -380,65 +412,75 @@ def fw_evaluate_cmd(
             rapidfire(lp, nlaunches=nlaunches, sleep_time=sleep)
         typer.echo("Launch complete for current queue.")
 
-
 @fw_app.command("run")
 def fw_run_cmd(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to problem config (YAML/JSON)."),
-    launchpad: Optional[Path] = typer.Option(None, "--launchpad", help="Path to my_launchpad.yaml (FireWorks LaunchPad config)."),
-    outdir: Optional[Path] = typer.Option(
-        None,
-        "--outdir",
-        "-o",
-        help=(
-            "Base results directory. Resolution order: "
-            "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results. "
-            "Outputs go under <base>/<problem_id>/..."
-        ),
-    ),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run id (defaults to UUID)."),
-    launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch immediately (rapidfire) after submitting."),
-    launch_dir: Optional[Path] = typer.Option(
-        None,
-        "--launch-dir",
-        help="Directory to place FireWorks launcher_* dirs (default: <base>/<problem_id>/launchers).",
-    ),
-    sleep: int = typer.Option(0, "--sleep", help="Seconds to sleep between rocket launches (rapidfire)."),
-    nlaunches: int = typer.Option(0, "--nlaunches", help="Max launches for rapidfire (0 means until queue empty)."),
+    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+    launchpad: Optional[Path] = typer.Option(None, "--launchpad"),
+    outdir: Optional[Path] = typer.Option(None, "--outdir", "-o"),
+    run_id: Optional[str] = typer.Option(None, "--run-id"),
+    launch: bool = typer.Option(True, "--launch/--no-launch"),
+    launch_dir: Optional[Path] = typer.Option(None, "--launch-dir"),
+    sleep: int = typer.Option(0, "--sleep"),
+    nlaunches: int = typer.Option(0, "--nlaunches"),
 ):
-    """
-    Submit AND (optionally) launch a full optimization loop using FireWorks.
-
-    Launchers:
-      FireWorks creates launcher_* dirs in CWD, so we chdir into the chosen launchers dir.
-    """
-    try:
-        from fireworks.core.rocket_launcher import rapidfire
-        from gow.fw.launchpad import load_launchpad
-        from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
-        from gow.optimizer import make_optimizer
-    except RuntimeError as e:
-        raise typer.BadParameter(str(e)) from e
-    except Exception as e:
-        raise typer.BadParameter(str(e)) from e
+    from fireworks.core.rocket_launcher import rapidfire
+    from gow.fw.launchpad import load_launchpad
+    from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
+    from gow.optimizer import make_optimizer
 
     config_abs = config.expanduser().resolve()
-    base_results = _resolve_base_results_dir(config_abs, outdir)
+    results_dir = _resolve_results_dir(config_abs, outdir)
 
     problem = load_problem_config(config_abs)
     lp = load_launchpad(launchpad)
 
     run_id_val = run_id or _default_run_id()
-    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else _default_launchers_dir(base_results, problem.id))
+    launchers_dir = launch_dir.expanduser().resolve() if launch_dir else _default_launchers_dir(results_dir)
 
     opt_cfg = problem.optimizer
-    optimizer = make_optimizer(opt_cfg.name, seed=opt_cfg.seed)
+    opt_kwargs = _optimizer_kwargs(opt_cfg)
 
-    typer.echo(f"Problem: {problem.id}")
-    typer.echo(f"run_id:  {run_id_val}")
-    typer.echo(f"base_results: {base_results}")
-    typer.echo(f"problem_dir:  {_problem_root(base_results, problem.id)}")
-    typer.echo(f"launchers_dir: {launchers_dir}")
-    typer.echo(f"max_evaluations={opt_cfg.max_evaluations}  batch_size={opt_cfg.batch_size}")
+    name_norm = str(opt_cfg.name).lower().strip()
+    if name_norm in {"differential_evolution", "de"}:
+        opt_kwargs.setdefault("population_size", opt_cfg.batch_size)
+        if opt_cfg.max_evaluations % opt_cfg.batch_size != 0:
+            raise ValueError("DE requires max_evaluations % batch_size == 0")
+
+    optimizer = make_optimizer(opt_cfg.name, seed=opt_cfg.seed, **opt_kwargs)
+
+    n_done = 0
+    while n_done < opt_cfg.max_evaluations:
+        n_batch = min(opt_cfg.batch_size, opt_cfg.max_evaluations - n_done)
+        generation_id = n_done // opt_cfg.batch_size
+        candidates = optimizer.ask(problem, n_batch)
+
+        candidate_ids: List[str] = []
+        for i, cand in enumerate(candidates):
+            idx = n_done + i
+            candidate_id = f"g{generation_id:06d}_c{idx:06d}"
+            candidate_ids.append(candidate_id)
+
+            spec = SingleEvalSpec(
+                problem_config=config_abs,
+                outdir=results_dir,
+                run_id=run_id_val,
+                candidate_id=candidate_id,
+                candidate_params=cand,
+            )
+            lp.add_wf(build_single_evaluate_workflow(spec))
+
+        if launch:
+            with _pushd(launchers_dir):
+                rapidfire(lp, nlaunches=nlaunches, sleep_time=sleep)
+
+        fitness_dicts = []
+        for cid in candidate_ids:
+            workdir = _candidate_workdir(results_dir, run_id_val, cid)
+            fitness_dicts.append(_read_candidate_fitness(workdir))
+
+        optimizer.tell(candidates, fitness_dicts)
+        n_done += n_batch
+
 
     def _read_candidate_fitness(workdir: Path) -> Dict[str, Any]:
         result_path = workdir / "result.json"
@@ -465,7 +507,7 @@ def fw_run_cmd(
 
             spec = SingleEvalSpec(
                 problem_config=config_abs,
-                outdir=base_results,  # <-- base results dir
+                outdir=results_dir,
                 run_id=run_id_val,
                 candidate_id=candidate_id,
                 candidate_params=cand,
@@ -482,7 +524,7 @@ def fw_run_cmd(
 
         fitness_dicts: List[Dict[str, Any]] = []
         for candidate_id in candidate_ids:
-            workdir = _candidate_workdir(base_results, problem.id, run_id_val, candidate_id)
+            workdir = _candidate_workdir(results_dir, run_id_val, candidate_id)
             fitness_dicts.append(_read_candidate_fitness(workdir))
 
         try:
@@ -493,9 +535,9 @@ def fw_run_cmd(
         n_done += n_batch
 
     typer.echo("Done.")
-    typer.echo(f"Problem results dir: {_problem_root(base_results, problem.id)}")
-    typer.echo(f"Problem results.jsonl: {_problem_root(base_results, problem.id) / 'results.jsonl'}")
-    typer.echo(f"Run results.jsonl: {_run_root(base_results, problem.id, run_id_val) / 'results.jsonl'}")
+    typer.echo(f"Results dir: {results_dir}")
+    typer.echo(f"Results.jsonl: {results_dir / 'results.jsonl'}")
+    typer.echo(f"Run results.jsonl: {_run_root(results_dir, run_id_val) / 'results.jsonl'}")
     typer.echo(f"Launchers dir: {launchers_dir}")
 
 

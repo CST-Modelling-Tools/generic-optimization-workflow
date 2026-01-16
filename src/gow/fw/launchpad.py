@@ -1,10 +1,11 @@
+# gow/fw/launchpad.py
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Union
 
 
-def _ensure_fireworks_imports():
+def _ensure_fireworks_imports() -> None:
     try:
         from fireworks import LaunchPad  # noqa: F401
     except Exception as e:  # pragma: no cover
@@ -38,12 +39,8 @@ def load_launchpad(launchpad_file: Optional[LaunchPadPath] = None) -> LaunchPad:
     - If launchpad_file is a directory: use <dir>/my_launchpad.yaml
     - If launchpad_file is None: try FireWorks auto-discovery (if available),
       otherwise fall back to LaunchPad().
-
-    Notes:
-      - This code is OS-independent; any OS-specific part is the user's MongoDB install.
     """
     if launchpad_file is None:
-        # Different FireWorks versions expose different helpers; keep it robust.
         auto = getattr(LaunchPad, "auto_load", None)
         if callable(auto):
             return auto()

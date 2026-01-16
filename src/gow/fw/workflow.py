@@ -29,14 +29,8 @@ def default_run_id() -> str:
 
 @dataclass(frozen=True)
 class SingleEvalSpec:
-    # Path to the problem YAML/JSON
-    problem_config: Path
-
-    # Base results directory (NOT runs dir). The workflow will create:
-    #   <outdir>/<problem_id>/runs/...
-    #   <outdir>/<problem_id>/results/...
-    outdir: Path
-
+    problem_config: Path         # path to optimization_specs.yaml
+    outdir: Path                 # flattened results root
     run_id: str
     candidate_id: str
     candidate_params: Dict[str, Any]
@@ -45,31 +39,19 @@ class SingleEvalSpec:
 
 def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
     """
-    Build a FireWorks Workflow that evaluates a single candidate and appends it to results.jsonl.
-
-    Target layout:
-      <base_results>/<problem_id>/
-        results/
-          results.jsonl
-          summary.json
-        runs/
-          <run_id>/<candidate_id>/{input.json,output.json,stdout.txt,stderr.txt,result.json}
+    Workflow:
+      1) EvaluateCandidateTask -> writes runs/<run_id>/<candidate_id>/result.json
+      2) AppendResultJsonlTask -> appends to <outdir>/results.jsonl and runs/<run_id>/results.jsonl
     """
-    # Normalize paths
     problem_config_abs = Path(spec.problem_config).expanduser().resolve()
-    base_results_abs = Path(spec.outdir).expanduser().resolve()
+    outdir_abs = Path(spec.outdir).expanduser().resolve()
 
-    # Load to get problem_id and validate config
+    # Load just for validation + problem_id
     problem = load_problem_config(problem_config_abs)
 
-    # Problem root (first folder is problem id)
-    problem_root = base_results_abs / problem.id
-
-    # --- FireWork 1: evaluate candidate (writes result.json under runs/<run_id>/<candidate_id>/)
     eval_task_params: Dict[str, Any] = {
         "problem_config": str(problem_config_abs),
-        # IMPORTANT: outdir is the *problem_root* (not base_results, not runs/)
-        "outdir": str(problem_root),
+        "outdir": str(outdir_abs),
         "run_id": spec.run_id,
         "candidate_id": spec.candidate_id,
         "candidate_params": _to_jsonable(spec.candidate_params),
@@ -80,31 +62,20 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
     fw_eval = Firework(
         [EvaluateCandidateTask(eval_task_params)],
         name=f"evaluate:{problem.id}:{spec.run_id}:{spec.candidate_id}",
-        spec={
-            "problem_id": problem.id,
-            "run_id": spec.run_id,
-            "candidate_id": spec.candidate_id,
-        },
+        spec={"problem_id": problem.id, "run_id": spec.run_id, "candidate_id": spec.candidate_id},
     )
 
-    # --- FireWork 2: append to results/results.jsonl (idempotent + locked)
     append_task_params: Dict[str, Any] = {
-        # IMPORTANT: outdir is the *problem_root*
-        "outdir": str(problem_root),
+        "outdir": str(outdir_abs),
         "problem_id": problem.id,
         "run_id": spec.run_id,
         "candidate_id": spec.candidate_id,
-        # filenames/locking kept as defaults in the task
     }
 
     fw_append = Firework(
         [AppendResultJsonlTask(append_task_params)],
         name=f"append-results:{problem.id}:{spec.run_id}:{spec.candidate_id}",
-        spec={
-            "problem_id": problem.id,
-            "run_id": spec.run_id,
-            "candidate_id": spec.candidate_id,
-        },
+        spec={"problem_id": problem.id, "run_id": spec.run_id, "candidate_id": spec.candidate_id},
         parents=[fw_eval],
     )
 

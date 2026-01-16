@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
 from gow.config import ProblemConfig
 from gow.evaluator import ExternalRunResult, run_external_evaluator
+
+
+def _looks_like_hfe_command(cmd: List[str]) -> bool:
+    """
+    Heuristic: treat as HFE if the first token is 'hfe'/'hfe.exe',
+    or if any token ends with those names.
+    """
+    if not cmd:
+        return False
+    first = Path(cmd[0]).name.lower()
+    if first in ("hfe", "hfe.exe"):
+        return True
+    for tok in cmd:
+        name = Path(tok).name.lower()
+        if name in ("hfe", "hfe.exe"):
+            return True
+    return False
+
+
+def _has_params_flag(cmd: List[str]) -> bool:
+    return ("--params-file" in cmd) or ("--params-json" in cmd)
 
 
 def evaluate_candidate(
@@ -23,7 +45,17 @@ def evaluate_candidate(
     - candidate_params: values for (some or all) parameters.
       Missing parameters fall back to problem.parameters[*].value.
     - context_override: optional extra/override entries merged into problem.context.
+
+    GOW contract support (generic):
+      - If the evaluator command appears to be HFE (heliostat-field-evaluator)
+        and does not already specify --params-file/--params-json, we will:
+          1) write <workdir>/params.json with the merged params
+          2) append: --params-file <workdir>/params.json
     """
+    # Candidate workdir
+    workdir = Path(workdir).resolve()
+    workdir.mkdir(parents=True, exist_ok=True)
+
     # Start from the configured baseline values
     params = problem.runtime_params()
     # Override with candidate values
@@ -53,6 +85,12 @@ def evaluate_candidate(
                     tok = str(candidate.resolve())
             resolved.append(tok)
         cmd = resolved
+
+    # --- Generic "contract" behavior for HFE: ensure params-file is provided ---
+    if _looks_like_hfe_command(cmd) and not _has_params_flag(cmd):
+        params_path = workdir / "params.json"
+        params_path.write_text(json.dumps(params, indent=2), encoding="utf-8")
+        cmd = cmd + ["--params-file", str(params_path)]
 
     return run_external_evaluator(
         command=cmd,
