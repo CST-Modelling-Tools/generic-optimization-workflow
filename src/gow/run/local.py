@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from gow.candidate_ids import format_candidate_id
 from gow.config import ProblemConfig
 from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
@@ -85,7 +86,7 @@ def run_local_optimization(
         fitness_dicts = []
         for i, cand in enumerate(candidates):
             candidate_index = n_done + i
-            candidate_id = f"g{generation_id:06d}_c{candidate_index:06d}"
+            candidate_id = format_candidate_id(generation_id=generation_id, candidate_index=candidate_index)
 
             workdir = run_root / candidate_id
             workdir.mkdir(parents=True, exist_ok=True)

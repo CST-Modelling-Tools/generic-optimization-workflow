@@ -10,7 +10,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import typer
 
+from gow.candidate_ids import format_candidate_id
 from gow.config import load_problem_config
+from gow.layout import candidate_workdir, launchers_dir as default_launchers_dir, run_root
 from gow.run import run_local_optimization
 
 
@@ -55,18 +57,6 @@ def _resolve_results_dir(config: Path, outdir: Optional[Path]) -> Path:
         return Path(env).expanduser().resolve()
 
     return config.expanduser().resolve().parent / "results"
-
-
-def _run_root(outdir: Path, run_id: str) -> Path:
-    return outdir / "runs" / run_id
-
-
-def _candidate_workdir(outdir: Path, run_id: str, candidate_id: str) -> Path:
-    return _run_root(outdir, run_id) / candidate_id
-
-
-def _default_launchers_dir(outdir: Path) -> Path:
-    return outdir / "launchers"
 
 
 def _parse_kv_params(items: List[str]) -> dict:
@@ -266,7 +256,7 @@ def evaluate_cmd(
 
     overrides.update(_parse_kv_params(param))
 
-    workdir = _candidate_workdir(results_dir, run_id, candidate_id)
+    workdir = candidate_workdir(results_dir, run_id, candidate_id)
 
     from gow.evaluation import evaluate_candidate  # local import
 
@@ -394,7 +384,7 @@ def fw_evaluate_cmd(
     results_dir = _resolve_results_dir(config_abs, outdir)
 
     problem = load_problem_config(config_abs)
-    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else _default_launchers_dir(results_dir))
+    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else default_launchers_dir(results_dir))
 
     lp = load_launchpad(launchpad)
 
@@ -465,7 +455,7 @@ def fw_run_cmd(
     lp = load_launchpad(launchpad)
 
     run_id_val = run_id or _default_run_id()
-    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else _default_launchers_dir(results_dir))
+    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else default_launchers_dir(results_dir))
 
     opt_cfg = problem.optimizer
     opt_kwargs = _optimizer_kwargs(opt_cfg)
@@ -511,7 +501,7 @@ def fw_run_cmd(
         candidate_ids: List[str] = []
         for i, cand in enumerate(candidates):
             idx = n_done + i
-            candidate_id = f"g{generation_id:06d}_c{idx:06d}"
+            candidate_id = format_candidate_id(generation_id=generation_id, candidate_index=idx)
             candidate_ids.append(candidate_id)
 
             spec = SingleEvalSpec(
@@ -533,7 +523,7 @@ def fw_run_cmd(
 
         fitness_dicts: List[Dict[str, Any]] = []
         for candidate_id in candidate_ids:
-            workdir = _candidate_workdir(results_dir, run_id_val, candidate_id)
+            workdir = candidate_workdir(results_dir, run_id_val, candidate_id)
             fitness_dicts.append(_read_candidate_fitness(workdir))
 
         try:
@@ -546,7 +536,7 @@ def fw_run_cmd(
     typer.echo("Done.")
     typer.echo(f"Results dir: {results_dir}")
     typer.echo(f"Results.jsonl: {results_dir / 'results.jsonl'}")
-    typer.echo(f"Run results.jsonl: {_run_root(results_dir, run_id_val) / 'results.jsonl'}")
+    typer.echo(f"Run results.jsonl: {run_root(results_dir, run_id_val) / 'results.jsonl'}")
     typer.echo(f"Launchers dir: {launchers_dir}")
 
 

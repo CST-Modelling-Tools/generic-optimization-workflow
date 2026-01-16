@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from gow.config import load_problem_config
 from gow.evaluation import evaluate_candidate
+from gow.layout import candidate_workdir, run_root as run_root_dir
 
 
 def _to_jsonable(obj: Any) -> Any:
@@ -55,22 +56,6 @@ from filelock import FileLock  # type: ignore  # noqa: E402
 
 
 # ---------------------------------------------------------------------
-# Path helpers (flattened)
-# ---------------------------------------------------------------------
-
-def _runs_dir(outdir: Path) -> Path:
-    return outdir / "runs"
-
-
-def _run_root(outdir: Path, run_id: str) -> Path:
-    return _runs_dir(outdir) / run_id
-
-
-def _candidate_workdir(outdir: Path, run_id: str, candidate_id: str) -> Path:
-    return _run_root(outdir, run_id) / candidate_id
-
-
-# ---------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------
 
@@ -114,7 +99,7 @@ class EvaluateCandidateTask(FiretaskBase):
 
         problem = load_problem_config(problem_config)
 
-        workdir = _candidate_workdir(outdir, run_id, candidate_id)
+        workdir = candidate_workdir(outdir, run_id, candidate_id)
         workdir.mkdir(parents=True, exist_ok=True)
 
         res = evaluate_candidate(
@@ -229,7 +214,7 @@ class AppendResultJsonlTask(FiretaskBase):
         if self.get("workdir"):
             workdir = Path(str(self["workdir"])).expanduser().resolve()
         else:
-            workdir = _candidate_workdir(outdir, run_id, candidate_id)
+            workdir = candidate_workdir(outdir, run_id, candidate_id)
 
         result_path = workdir / result_filename
         if not result_path.exists():
@@ -266,8 +251,8 @@ class AppendResultJsonlTask(FiretaskBase):
 
         outdir.mkdir(parents=True, exist_ok=True)
 
-        run_root = _run_root(outdir, run_id)
-        run_root.mkdir(parents=True, exist_ok=True)
+        run_dir = run_root_dir(outdir, run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
 
         # 1) problem-level canonical file (flat)
         problem_results_path = outdir / results_filename
@@ -282,8 +267,8 @@ class AppendResultJsonlTask(FiretaskBase):
         )
 
         # 2) per-run convenience file (optional)
-        run_results_path = run_root / results_filename
-        run_lock_path = run_root / lock_filename
+        run_results_path = run_dir / results_filename
+        run_lock_path = run_dir / lock_filename
         appended_run = None
         if append_run_level:
             appended_run = self._append_one(
