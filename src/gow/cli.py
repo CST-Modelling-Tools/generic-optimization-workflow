@@ -105,7 +105,11 @@ def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
             yield json.loads(line)
 
 
-def _pick_best(records: Iterable[Dict[str, Any]], *, direction: str = "minimize") -> list[Dict[str, Any]]:
+def _pick_best(
+    records: Iterable[Dict[str, Any]],
+    *,
+    direction: str = "minimize",
+) -> list[Dict[str, Any]]:
     if direction not in {"minimize", "maximize"}:
         raise ValueError("direction must be 'minimize' or 'maximize'")
 
@@ -149,21 +153,18 @@ def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
     else:
         data = dict(getattr(opt_cfg, "__dict__", {}) or {})
 
-    # Pull settings out and flatten them
     settings = data.get("settings") or {}
     if not isinstance(settings, dict):
         raise ValueError(f"optimizer.settings must be a dict, got {type(settings)}")
 
-    # Drop known non-constructor fields
     for k in ("name", "seed", "max_evaluations", "batch_size", "settings"):
         data.pop(k, None)
 
-    # Merge: top-level extras (if any) + settings
-    # settings wins if same key appears twice
     out = {k: v for k, v in data.items() if not str(k).startswith("_")}
     out.update(settings)
     out = {k: v for k, v in out.items() if not str(k).startswith("_")}
     return out
+
 
 @contextmanager
 def _pushd(path: Path):
@@ -186,7 +187,13 @@ def _pushd(path: Path):
 
 @commands.command("run")
 def run_cmd(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to optimization specs (YAML/JSON)."),
+    config: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to optimization specs (YAML/JSON).",
+    ),
     outdir: Optional[Path] = typer.Option(
         None,
         "--outdir",
@@ -221,7 +228,13 @@ def info():
 
 @commands.command("evaluate")
 def evaluate_cmd(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to optimization specs (YAML/JSON)."),
+    config: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to optimization specs (YAML/JSON).",
+    ),
     outdir: Optional[Path] = typer.Option(
         None,
         "--outdir",
@@ -359,12 +372,6 @@ def fw_evaluate_cmd(
 ):
     """
     Submit a single-candidate evaluation workflow to FireWorks (optionally launch).
-
-    Outputs:
-      <outdir>/runs/<run_id>/<candidate_id>/...
-      <outdir>/results.jsonl
-      <outdir>/runs/<run_id>/results.jsonl
-      <outdir>/launchers/launcher_*   (default)
     """
     overrides: Dict[str, Any] = {}
     if params_file is not None:
@@ -393,7 +400,7 @@ def fw_evaluate_cmd(
 
     spec = SingleEvalSpec(
         problem_config=config_abs,
-        outdir=results_dir,  # flattened
+        outdir=results_dir,
         run_id=run_id,
         candidate_id=candidate_id,
         candidate_params=overrides,
@@ -412,21 +419,44 @@ def fw_evaluate_cmd(
             rapidfire(lp, nlaunches=nlaunches, sleep_time=sleep)
         typer.echo("Launch complete for current queue.")
 
+
 @fw_app.command("run")
 def fw_run_cmd(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
-    launchpad: Optional[Path] = typer.Option(None, "--launchpad"),
-    outdir: Optional[Path] = typer.Option(None, "--outdir", "-o"),
-    run_id: Optional[str] = typer.Option(None, "--run-id"),
-    launch: bool = typer.Option(True, "--launch/--no-launch"),
-    launch_dir: Optional[Path] = typer.Option(None, "--launch-dir"),
-    sleep: int = typer.Option(0, "--sleep"),
-    nlaunches: int = typer.Option(0, "--nlaunches"),
+    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to optimization specs (YAML/JSON)."),
+    launchpad: Optional[Path] = typer.Option(None, "--launchpad", help="Path to my_launchpad.yaml (FireWorks LaunchPad config)."),
+    outdir: Optional[Path] = typer.Option(
+        None,
+        "--outdir",
+        "-o",
+        help=(
+            "Results directory (flattened). Resolution order: "
+            "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results."
+        ),
+    ),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run id (defaults to UUID)."),
+    launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch immediately (rapidfire) after submitting."),
+    launch_dir: Optional[Path] = typer.Option(
+        None,
+        "--launch-dir",
+        help="Directory to place FireWorks launcher_* dirs (default: <outdir>/launchers).",
+    ),
+    sleep: int = typer.Option(0, "--sleep", help="Seconds to sleep between rocket launches (rapidfire)."),
+    nlaunches: int = typer.Option(0, "--nlaunches", help="Max launches for rapidfire (0 means until queue empty)."),
 ):
-    from fireworks.core.rocket_launcher import rapidfire
-    from gow.fw.launchpad import load_launchpad
-    from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
-    from gow.optimizer import make_optimizer
+    """
+    Submit AND (optionally) launch a full optimization loop using FireWorks.
+
+    NOTE: This is a simple synchronous loop (submit batch -> launch -> read results -> tell).
+    """
+    try:
+        from fireworks.core.rocket_launcher import rapidfire
+        from gow.fw.launchpad import load_launchpad
+        from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
+        from gow.optimizer import make_optimizer
+    except RuntimeError as e:
+        raise typer.BadParameter(str(e)) from e
+    except Exception as e:
+        raise typer.BadParameter(str(e)) from e
 
     config_abs = config.expanduser().resolve()
     results_dir = _resolve_results_dir(config_abs, outdir)
@@ -435,7 +465,7 @@ def fw_run_cmd(
     lp = load_launchpad(launchpad)
 
     run_id_val = run_id or _default_run_id()
-    launchers_dir = launch_dir.expanduser().resolve() if launch_dir else _default_launchers_dir(results_dir)
+    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else _default_launchers_dir(results_dir))
 
     opt_cfg = problem.optimizer
     opt_kwargs = _optimizer_kwargs(opt_cfg)
@@ -444,43 +474,19 @@ def fw_run_cmd(
     if name_norm in {"differential_evolution", "de"}:
         opt_kwargs.setdefault("population_size", opt_cfg.batch_size)
         if opt_cfg.max_evaluations % opt_cfg.batch_size != 0:
-            raise ValueError("DE requires max_evaluations % batch_size == 0")
+            raise ValueError(
+                "Differential Evolution requires max_evaluations to be a multiple of batch_size "
+                "(one full population per generation). "
+                f"Got max_evaluations={opt_cfg.max_evaluations}, batch_size={opt_cfg.batch_size}."
+            )
 
     optimizer = make_optimizer(opt_cfg.name, seed=opt_cfg.seed, **opt_kwargs)
 
-    n_done = 0
-    while n_done < opt_cfg.max_evaluations:
-        n_batch = min(opt_cfg.batch_size, opt_cfg.max_evaluations - n_done)
-        generation_id = n_done // opt_cfg.batch_size
-        candidates = optimizer.ask(problem, n_batch)
-
-        candidate_ids: List[str] = []
-        for i, cand in enumerate(candidates):
-            idx = n_done + i
-            candidate_id = f"g{generation_id:06d}_c{idx:06d}"
-            candidate_ids.append(candidate_id)
-
-            spec = SingleEvalSpec(
-                problem_config=config_abs,
-                outdir=results_dir,
-                run_id=run_id_val,
-                candidate_id=candidate_id,
-                candidate_params=cand,
-            )
-            lp.add_wf(build_single_evaluate_workflow(spec))
-
-        if launch:
-            with _pushd(launchers_dir):
-                rapidfire(lp, nlaunches=nlaunches, sleep_time=sleep)
-
-        fitness_dicts = []
-        for cid in candidate_ids:
-            workdir = _candidate_workdir(results_dir, run_id_val, cid)
-            fitness_dicts.append(_read_candidate_fitness(workdir))
-
-        optimizer.tell(candidates, fitness_dicts)
-        n_done += n_batch
-
+    typer.echo(f"Problem: {problem.id}")
+    typer.echo(f"run_id:  {run_id_val}")
+    typer.echo(f"results_dir: {results_dir}")
+    typer.echo(f"launchers_dir: {launchers_dir}")
+    typer.echo(f"max_evaluations={opt_cfg.max_evaluations}  batch_size={opt_cfg.batch_size}")
 
     def _read_candidate_fitness(workdir: Path) -> Dict[str, Any]:
         result_path = workdir / "result.json"
@@ -498,11 +504,14 @@ def fw_run_cmd(
     n_done = 0
     while n_done < opt_cfg.max_evaluations:
         n_batch = min(opt_cfg.batch_size, opt_cfg.max_evaluations - n_done)
+        generation_id = n_done // opt_cfg.batch_size
+
         candidates = optimizer.ask(problem, n_batch)
 
         candidate_ids: List[str] = []
         for i, cand in enumerate(candidates):
-            candidate_id = f"c{n_done + i:06d}"
+            idx = n_done + i
+            candidate_id = f"g{generation_id:06d}_c{idx:06d}"
             candidate_ids.append(candidate_id)
 
             spec = SingleEvalSpec(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from gow.config import load_problem_config
 from gow.evaluation import evaluate_candidate
@@ -70,6 +70,26 @@ def _candidate_workdir(outdir: Path, run_id: str, candidate_id: str) -> Path:
     return _run_root(outdir, run_id) / candidate_id
 
 
+# ---------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------
+
+def _unique_key(record: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Idempotency key for results.jsonl lines.
+    Prefer (run_id, candidate_id). If missing, returns (None, candidate_id).
+    """
+    rid = record.get("run_id")
+    cid = record.get("candidate_id")
+    rid = str(rid) if rid is not None else None
+    cid = str(cid) if cid is not None else None
+    return rid, cid
+
+
+# ---------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------
+
 @explicit_serialize
 class EvaluateCandidateTask(FiretaskBase):
     """
@@ -79,7 +99,7 @@ class EvaluateCandidateTask(FiretaskBase):
     `outdir` is the flattened problem root (same as CLI --outdir).
     """
     required_params = ["problem_config", "run_id", "candidate_id", "candidate_params", "outdir"]
-    optional_params = ["context_override"]
+    optional_params = ["context_override", "generation_id", "candidate_index"]
 
     def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
         problem_config = Path(self["problem_config"]).expanduser()
@@ -88,6 +108,9 @@ class EvaluateCandidateTask(FiretaskBase):
         candidate_params: Dict[str, Any] = dict(self["candidate_params"])
         outdir = Path(self["outdir"]).expanduser().resolve()
         context_override: Optional[Dict[str, Any]] = self.get("context_override")
+
+        generation_id = self.get("generation_id")
+        candidate_index = self.get("candidate_index")
 
         problem = load_problem_config(problem_config)
 
@@ -103,10 +126,13 @@ class EvaluateCandidateTask(FiretaskBase):
             context_override=context_override,
         )
 
-        stored = {
+        stored: Dict[str, Any] = {
             "problem_id": problem.id,
             "run_id": run_id,
             "candidate_id": candidate_id,
+            # include generation_id in record if provided (no folder-per-generation)
+            "generation_id": generation_id,
+            "candidate_index": candidate_index,
             "params": _to_jsonable({**problem.runtime_params(), **candidate_params}),
             "fitness": _to_jsonable(res.fitness.model_dump()),
             "returncode": res.returncode,
@@ -134,7 +160,11 @@ class AppendResultJsonlTask(FiretaskBase):
       2) <outdir>/runs/<run_id>/results.jsonl  (optional)
 
     Uses file locks to prevent corruption under parallel execution.
-    Idempotent by candidate_id.
+    Idempotent by (run_id, candidate_id).
+
+    HARD SAFETY:
+      - will refuse to append if result.json's candidate_id != task candidate_id
+      - will refuse to append if result.json's run_id != task run_id
     """
     required_params = ["outdir", "problem_id", "run_id", "candidate_id"]
     optional_params = [
@@ -144,9 +174,11 @@ class AppendResultJsonlTask(FiretaskBase):
         "lock_filename",
         "skip_if_exists",
         "append_run_level",
+        "generation_id",
+        "candidate_index",
     ]
 
-    def _already_appended(self, results_path: Path, candidate_id: str) -> bool:
+    def _already_appended(self, results_path: Path, *, run_id: str, candidate_id: str) -> bool:
         try:
             with results_path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -157,7 +189,8 @@ class AppendResultJsonlTask(FiretaskBase):
                         obj = json.loads(line)
                     except Exception:
                         continue
-                    if obj.get("candidate_id") == candidate_id:
+                    rid, cid = _unique_key(obj)
+                    if rid == run_id and cid == candidate_id:
                         return True
         except FileNotFoundError:
             return False
@@ -168,12 +201,14 @@ class AppendResultJsonlTask(FiretaskBase):
         results_path: Path,
         lock_path: Path,
         record: Dict[str, Any],
+        *,
+        run_id: str,
         candidate_id: str,
         skip_if_exists: bool,
     ) -> bool:
         lock = FileLock(str(lock_path))
         with lock:
-            if skip_if_exists and self._already_appended(results_path, candidate_id):
+            if skip_if_exists and self._already_appended(results_path, run_id=run_id, candidate_id=candidate_id):
                 return False
             with results_path.open("a", encoding="utf-8") as f:
                 f.write(_jsonl_dumps(record) + "\n")
@@ -202,11 +237,32 @@ class AppendResultJsonlTask(FiretaskBase):
 
         record = json.loads(result_path.read_text(encoding="utf-8"))
 
+        # --- HARD CONSISTENCY CHECKS (this prevents the mixed naming issue) ---
         rec_pid = record.get("problem_id")
         if rec_pid and rec_pid != problem_id:
             raise RuntimeError(
                 f"Record problem_id={rec_pid!r} does not match task problem_id={problem_id!r}"
             )
+
+        rec_rid = record.get("run_id")
+        if rec_rid is not None and str(rec_rid) != str(run_id):
+            raise RuntimeError(
+                f"Record run_id={rec_rid!r} does not match task run_id={run_id!r} "
+                f"(workdir={workdir})"
+            )
+
+        rec_cid = record.get("candidate_id")
+        if rec_cid is not None and str(rec_cid) != str(candidate_id):
+            raise RuntimeError(
+                f"Record candidate_id={rec_cid!r} does not match task candidate_id={candidate_id!r} "
+                f"(workdir={workdir})"
+            )
+
+        # If workflow passed generation metadata, ensure it is present (doesn't change folder layout)
+        if self.get("generation_id") is not None and record.get("generation_id") is None:
+            record["generation_id"] = self.get("generation_id")
+        if self.get("candidate_index") is not None and record.get("candidate_index") is None:
+            record["candidate_index"] = self.get("candidate_index")
 
         outdir.mkdir(parents=True, exist_ok=True)
 
@@ -217,7 +273,12 @@ class AppendResultJsonlTask(FiretaskBase):
         problem_results_path = outdir / results_filename
         problem_lock_path = outdir / lock_filename
         appended_problem = self._append_one(
-            problem_results_path, problem_lock_path, record, candidate_id, skip_if_exists
+            problem_results_path,
+            problem_lock_path,
+            record,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            skip_if_exists=skip_if_exists,
         )
 
         # 2) per-run convenience file (optional)
@@ -226,7 +287,12 @@ class AppendResultJsonlTask(FiretaskBase):
         appended_run = None
         if append_run_level:
             appended_run = self._append_one(
-                run_results_path, run_lock_path, record, candidate_id, skip_if_exists
+                run_results_path,
+                run_lock_path,
+                record,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                skip_if_exists=skip_if_exists,
             )
 
         return FWAction(
