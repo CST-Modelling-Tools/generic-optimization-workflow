@@ -9,7 +9,7 @@ from gow.candidate_ids import format_candidate_id
 from gow.config import ProblemConfig
 from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
-from gow.results.jsonl import append_jsonl_line
+from gow.result.jsonl import append_jsonl_line
 
 
 def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
@@ -83,7 +83,10 @@ def run_local_optimization(
         fitness_dicts = []
         for i, cand in enumerate(candidates):
             candidate_index = n_done + i
-            candidate_id = format_candidate_id(generation_id=generation_id, candidate_index=candidate_index)
+            candidate_id = format_candidate_id(
+                generation_id=generation_id,
+                candidate_index=candidate_index,
+            )
 
             workdir = run_root / candidate_id
             workdir.mkdir(parents=True, exist_ok=True)

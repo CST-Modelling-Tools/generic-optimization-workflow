@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from gow.config import load_problem_config
 from gow.evaluation import evaluate_candidate
 from gow.layout import candidate_workdir, run_root as run_root_dir
-from gow.results.jsonl import jsonl_dumps
+from gow.result.jsonl import append_jsonl_line
 
 
 def _to_jsonable(obj: Any) -> Any:
@@ -187,8 +187,7 @@ class AppendResultJsonlTask(FiretaskBase):
         with lock:
             if skip_if_exists and self._already_appended(results_path, run_id=run_id, candidate_id=candidate_id):
                 return False
-            with results_path.open("a", encoding="utf-8") as f:
-                f.write(jsonl_dumps(record) + "\n")
+            append_jsonl_line(results_path, record)
         return True
 
     def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
