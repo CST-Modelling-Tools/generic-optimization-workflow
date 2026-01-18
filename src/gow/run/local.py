@@ -9,7 +9,7 @@ from gow.candidate_ids import format_candidate_id
 from gow.config import ProblemConfig
 from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
-from gow.result.jsonl import append_jsonl_line
+from gow.output.jsonl import append_jsonl_line
 
 
 def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:

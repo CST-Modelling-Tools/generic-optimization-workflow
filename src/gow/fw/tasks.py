@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from gow.config import load_problem_config
 from gow.evaluation import evaluate_candidate
 from gow.layout import candidate_workdir, run_root as run_root_dir
-from gow.result.jsonl import append_jsonl_line
+from gow.output.jsonl import append_jsonl_line
 
 
 def _to_jsonable(obj: Any) -> Any:
