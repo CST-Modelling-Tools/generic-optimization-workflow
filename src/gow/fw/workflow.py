@@ -39,9 +39,11 @@ class SingleEvalSpec:
 
 def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
     """
-    Workflow:
+    Workflow (single FireWork, two Firetasks):
       1) EvaluateCandidateTask -> writes runs/<run_id>/<candidate_id>/result.json
       2) AppendResultJsonlTask -> appends to <outdir>/results.jsonl and runs/<run_id>/results.jsonl
+
+    This design reduces launches by 2x (previously 2 FireWorks per candidate).
     """
     problem_config_abs = Path(spec.problem_config).expanduser().resolve()
     outdir_abs = Path(spec.outdir).expanduser().resolve()
@@ -59,12 +61,6 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
     if spec.context_override:
         eval_task_params["context_override"] = _to_jsonable(spec.context_override)
 
-    fw_eval = Firework(
-        [EvaluateCandidateTask(eval_task_params)],
-        name=f"evaluate:{problem.id}:{spec.run_id}:{spec.candidate_id}",
-        spec={"problem_id": problem.id, "run_id": spec.run_id, "candidate_id": spec.candidate_id},
-    )
-
     append_task_params: Dict[str, Any] = {
         "outdir": str(outdir_abs),
         "problem_id": problem.id,
@@ -72,12 +68,15 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
         "candidate_id": spec.candidate_id,
     }
 
-    fw_append = Firework(
-        [AppendResultJsonlTask(append_task_params)],
-        name=f"append-results:{problem.id}:{spec.run_id}:{spec.candidate_id}",
+    # Single FireWork containing both tasks in sequence.
+    fw = Firework(
+        [
+            EvaluateCandidateTask(eval_task_params),
+            AppendResultJsonlTask(append_task_params),
+        ],
+        name=f"evaluate+append:{problem.id}:{spec.run_id}:{spec.candidate_id}",
         spec={"problem_id": problem.id, "run_id": spec.run_id, "candidate_id": spec.candidate_id},
-        parents=[fw_eval],
     )
 
     wf_name = f"gow-single-eval:{problem.id}:{spec.run_id}:{spec.candidate_id}"
-    return Workflow([fw_eval, fw_append], name=wf_name)
+    return Workflow([fw], name=wf_name)
