@@ -12,11 +12,26 @@ from gow.optimizer import make_optimizer
 from gow.output.jsonl import append_jsonl_line
 
 
-def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
+def _optimizer_kwargs(problem: ProblemConfig) -> Dict[str, Any]:
+    """Convert ProblemConfig.optimizer into kwargs for make_optimizer().
+
+    We intentionally keep this logic local (rather than in config parsing) because
+    different runners/backends may want slightly different defaults.
+
+    Rules:
+      - Start from optimizer.settings (must be a dict).
+      - Merge in any extra fields on optimizer config (excluding standard keys).
+      - For Differential Evolution, default population_size to batch_size.
+      - Always provide seed (defaulting from optimizer.seed).
+    """
+
+    opt_cfg = problem.optimizer
+
+    # Extract a plain dict representation of the optimizer config.
     if hasattr(opt_cfg, "model_dump"):
-        data = opt_cfg.model_dump()
+        data: Dict[str, Any] = opt_cfg.model_dump()
     elif hasattr(opt_cfg, "dict"):
-        data = opt_cfg.dict()
+        data = opt_cfg.dict()  # type: ignore[assignment]
     else:
         data = dict(getattr(opt_cfg, "__dict__", {}) or {})
 
@@ -24,12 +39,22 @@ def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
     if not isinstance(settings, dict):
         raise ValueError(f"optimizer.settings must be a dict, got {type(settings)}")
 
+    # Remove known top-level keys that are not constructor kwargs.
     for k in ("name", "seed", "max_evaluations", "batch_size", "settings"):
         data.pop(k, None)
 
-    out = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    # Merge: extra top-level keys (rare) + settings.
+    out: Dict[str, Any] = {k: v for k, v in data.items() if not str(k).startswith("_")}
     out.update(settings)
     out = {k: v for k, v in out.items() if not str(k).startswith("_")}
+
+    # Common convenience: if population_size not set for DE, default it to batch_size.
+    name_norm = str(opt_cfg.name).lower().strip()
+    if name_norm in {"differential_evolution", "de"}:
+        out.setdefault("population_size", opt_cfg.batch_size)
+
+    # Always pass seed through kwargs (call sites can still pop it if needed).
+    out.setdefault("seed", opt_cfg.seed)
     return out
 
 
@@ -56,18 +81,19 @@ def run_local_optimization(
     run_results_path = run_root / "results.jsonl"
 
     opt_cfg = problem.optimizer
-    opt_kwargs = _optimizer_kwargs(opt_cfg)
+    opt_kwargs = _optimizer_kwargs(problem)
 
     name_norm = str(opt_cfg.name).lower().strip()
     if name_norm in {"differential_evolution", "de"}:
-        opt_kwargs.setdefault("population_size", opt_cfg.batch_size)
         if opt_cfg.max_evaluations % opt_cfg.batch_size != 0:
             raise ValueError(
                 "Differential Evolution requires max_evaluations to be a multiple of batch_size "
                 f"(got {opt_cfg.max_evaluations}, batch_size={opt_cfg.batch_size})"
             )
 
-    optimizer = make_optimizer(opt_cfg.name, seed=opt_cfg.seed, **opt_kwargs)
+    # Avoid passing seed twice if make_optimizer also takes seed= explicitly.
+    seed = opt_kwargs.pop("seed", opt_cfg.seed)
+    optimizer = make_optimizer(opt_cfg.name, seed=seed, **opt_kwargs)
 
     direction = problem.objective.direction
     maximize = direction == "maximize"
