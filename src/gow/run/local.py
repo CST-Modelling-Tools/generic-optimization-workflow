@@ -132,6 +132,25 @@ def run_local_optimization(
                     }
 
         optimizer.tell(candidates, fitness_dicts)
+
+        # -----------------------------
+        # Optional diagnostics logging
+        # -----------------------------
+        if hasattr(optimizer, "_n_status_failed"):
+            n_failed = optimizer._n_status_failed
+            n_missing = optimizer._n_missing_score
+            n_non_numeric = optimizer._n_non_numeric
+            n_non_finite = optimizer._n_non_finite
+
+            if n_failed or n_missing or n_non_numeric or n_non_finite:
+                print(
+                    f"[DE diagnostics | gen={generation_id}] "
+                    f"failed={n_failed}, "
+                    f"missing_score={n_missing}, "
+                    f"non_numeric={n_non_numeric}, "
+                    f"non_finite={n_non_finite}"
+                )
+
         n_done += n_batch
 
     summary = {
