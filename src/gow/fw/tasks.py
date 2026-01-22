@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -51,6 +52,52 @@ from filelock import FileLock  # type: ignore  # noqa: E402
 # Small helpers
 # ---------------------------------------------------------------------
 
+_CAND_ID_RE = re.compile(r"^g(?P<g>\d+)_c(?P<c>\d+)$")
+
+
+def _parse_candidate_id(candidate_id: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Parse canonical candidate ids like:
+      g000009_c000495
+
+    Returns: (generation_id, candidate_index) or (None, None) if not parseable.
+    """
+    m = _CAND_ID_RE.match(str(candidate_id))
+    if not m:
+        return None, None
+    try:
+        g = int(m.group("g"))
+        c = int(m.group("c"))
+    except Exception:
+        return None, None
+    return g, c
+
+
+def _fill_generation_metadata(
+    *,
+    candidate_id: str,
+    generation_id: Optional[int],
+    candidate_index: Optional[int],
+) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Fill missing generation_id / candidate_index.
+    Priority:
+      1) explicitly provided values
+      2) parse from candidate_id if missing
+    """
+    g = generation_id
+    c = candidate_index
+    if g is not None and c is not None:
+        return g, c
+
+    pg, pc = _parse_candidate_id(candidate_id)
+    if g is None:
+        g = pg
+    if c is None:
+        c = pc
+    return g, c
+
+
 def _unique_key(record: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     """
     Idempotency key for results.jsonl lines.
@@ -86,8 +133,14 @@ class EvaluateCandidateTask(FiretaskBase):
         outdir = Path(self["outdir"]).expanduser().resolve()
         context_override: Optional[Dict[str, Any]] = self.get("context_override")
 
-        generation_id = self.get("generation_id")
-        candidate_index = self.get("candidate_index")
+        # Fill metadata even if workflow didn't pass it.
+        generation_id_raw = self.get("generation_id")
+        candidate_index_raw = self.get("candidate_index")
+        generation_id, candidate_index = _fill_generation_metadata(
+            candidate_id=candidate_id,
+            generation_id=generation_id_raw if isinstance(generation_id_raw, int) else generation_id_raw,
+            candidate_index=candidate_index_raw if isinstance(candidate_index_raw, int) else candidate_index_raw,
+        )
 
         problem = load_problem_config(problem_config)
 
@@ -107,7 +160,7 @@ class EvaluateCandidateTask(FiretaskBase):
             "problem_id": problem.id,
             "run_id": run_id,
             "candidate_id": candidate_id,
-            # include generation_id in record if provided (no folder-per-generation)
+            # include generation metadata (doesn't change folder layout)
             "generation_id": generation_id,
             "candidate_index": candidate_index,
             "params": _to_jsonable({**problem.runtime_params(), **candidate_params}),
@@ -234,11 +287,18 @@ class AppendResultJsonlTask(FiretaskBase):
                 f"(workdir={workdir})"
             )
 
-        # If workflow passed generation metadata, ensure it is present (doesn't change folder layout)
-        if self.get("generation_id") is not None and record.get("generation_id") is None:
-            record["generation_id"] = self.get("generation_id")
-        if self.get("candidate_index") is not None and record.get("candidate_index") is None:
-            record["candidate_index"] = self.get("candidate_index")
+        # Ensure generation metadata is present even if upstream didn't provide it.
+        task_gen = self.get("generation_id")
+        task_idx = self.get("candidate_index")
+        gen_filled, idx_filled = _fill_generation_metadata(
+            candidate_id=candidate_id,
+            generation_id=task_gen if isinstance(task_gen, int) else record.get("generation_id"),
+            candidate_index=task_idx if isinstance(task_idx, int) else record.get("candidate_index"),
+        )
+        if record.get("generation_id") is None:
+            record["generation_id"] = gen_filled
+        if record.get("candidate_index") is None:
+            record["candidate_index"] = idx_filled
 
         outdir.mkdir(parents=True, exist_ok=True)
 

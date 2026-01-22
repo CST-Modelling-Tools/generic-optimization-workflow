@@ -6,15 +6,14 @@ import os
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Iterable
 
 import typer
 
 from gow.candidate_ids import format_candidate_id
 from gow.config import load_problem_config
-from gow.layout import candidate_workdir, launchers_dir as default_launchers_dir, run_root
+from gow.layout import candidate_workdir, run_launchers_dir, run_root
 from gow.run import run_local_optimization
-
 
 app = typer.Typer(help="Generic Optimization Workflow (gow)")
 commands = typer.Typer(help="Commands")
@@ -23,18 +22,17 @@ fw_app = typer.Typer(help="FireWorks backend (optional)")
 app.add_typer(commands)
 app.add_typer(fw_app, name="fw")
 
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-
 ENV_OUTDIR = "GOW_OUTDIR"
 
 
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 def _default_run_id() -> str:
     return str(uuid.uuid4())
 
 
-def _resolve_results_dir(config: Path, outdir: Optional[Path]) -> Path:
+def _resolve_results_dir(config: Path, outdir: Path | None) -> Path:
     """
     Resolution order:
       1) explicit --outdir
@@ -46,8 +44,7 @@ def _resolve_results_dir(config: Path, outdir: Optional[Path]) -> Path:
       <outdir>/
         results.jsonl
         summary.json
-        runs/...
-        launchers/...
+        runs/<run_id>/...
     """
     if outdir is not None:
         return outdir.expanduser().resolve()
@@ -59,8 +56,8 @@ def _resolve_results_dir(config: Path, outdir: Optional[Path]) -> Path:
     return config.expanduser().resolve().parent / "results"
 
 
-def _parse_kv_params(items: List[str]) -> dict:
-    out: Dict[str, Any] = {}
+def _parse_kv_params(items: list[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for item in items:
         if "=" not in item:
             raise typer.BadParameter(f"Invalid --param '{item}'. Use NAME=VALUE.")
@@ -71,11 +68,13 @@ def _parse_kv_params(items: List[str]) -> dict:
         if v.lower() in {"true", "false"}:
             out[k] = (v.lower() == "true")
             continue
+
         try:
             out[k] = int(v)
             continue
         except ValueError:
             pass
+
         try:
             out[k] = float(v)
             continue
@@ -86,7 +85,7 @@ def _parse_kv_params(items: List[str]) -> dict:
     return out
 
 
-def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -95,15 +94,11 @@ def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
             yield json.loads(line)
 
 
-def _pick_best(
-    records: Iterable[Dict[str, Any]],
-    *,
-    direction: str = "minimize",
-) -> list[Dict[str, Any]]:
+def _pick_best(records: Iterable[dict[str, Any]], *, direction: str = "minimize") -> list[dict[str, Any]]:
     if direction not in {"minimize", "maximize"}:
         raise ValueError("direction must be 'minimize' or 'maximize'")
 
-    good: List[Dict[str, Any]] = []
+    good: list[dict[str, Any]] = []
     for r in records:
         fit = (r or {}).get("fitness", {}) or {}
         if fit.get("status") != "ok":
@@ -119,34 +114,29 @@ def _pick_best(
         rr["_objective"] = obj_val
         good.append(rr)
 
-    reverse = (direction == "maximize")
+    reverse = direction == "maximize"
     good.sort(key=lambda x: x["_objective"], reverse=reverse)
     return good
 
 
-def _optimizer_kwargs(opt_cfg: Any) -> Dict[str, Any]:
+def _optimizer_kwargs(opt_cfg: Any) -> dict[str, Any]:
     """
     Extract optimizer-specific kwargs from opt_cfg.
 
     In GOW, optimizer hyperparameters are stored in opt_cfg.settings (dict).
     This function flattens that dict and returns it as kwargs for make_optimizer().
 
-    Works with:
-      - Pydantic v2: model_dump()
-      - Pydantic v1: dict()
-      - simple objects: __dict__
+    Clean mode: requires Pydantic v2 models (model_dump()).
     """
-    if hasattr(opt_cfg, "model_dump"):
-        data = opt_cfg.model_dump()
-    elif hasattr(opt_cfg, "dict"):
-        data = opt_cfg.dict()
-    else:
-        data = dict(getattr(opt_cfg, "__dict__", {}) or {})
+    if not hasattr(opt_cfg, "model_dump"):
+        raise TypeError("optimizer config must be a Pydantic v2 model (missing model_dump())")
 
+    data = opt_cfg.model_dump()
     settings = data.get("settings") or {}
     if not isinstance(settings, dict):
         raise ValueError(f"optimizer.settings must be a dict, got {type(settings)}")
 
+    # remove the standard fields (not forwarded)
     for k in ("name", "seed", "max_evaluations", "batch_size", "settings"):
         data.pop(k, None)
 
@@ -171,10 +161,60 @@ def _pushd(path: Path):
         os.chdir(str(prev))
 
 
+def _coerce_objective(fitness: dict[str, Any]) -> float | None:
+    if not isinstance(fitness, dict):
+        return None
+    if fitness.get("status") != "ok":
+        return None
+    obj = fitness.get("objective")
+    if obj is None:
+        return None
+    try:
+        return float(obj)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_better(a: float, b: float, direction: str) -> bool:
+    if direction == "minimize":
+        return a < b
+    if direction == "maximize":
+        return a > b
+    raise ValueError("direction must be 'minimize' or 'maximize'")
+
+
+def _write_summary_json(
+    *,
+    results_dir: Path,
+    problem_id: str,
+    run_id: str,
+    max_evaluations: int,
+    direction: str,
+    best_candidate: dict[str, Any] | None,
+) -> Path:
+    results_dir = results_dir.expanduser().resolve()
+    run_root_dir = run_root(results_dir, run_id)
+
+    summary: dict[str, Any] = {
+        "best": best_candidate,
+        "max_evaluations": max_evaluations,
+        "objective": {"direction": direction},
+        "outdir": str(results_dir),
+        "problem_id": problem_id,
+        "results_file": str(results_dir / "results.jsonl"),
+        "run_id": run_id,
+        "run_results_file": str(run_root_dir / "results.jsonl"),
+        "run_root": str(run_root_dir),
+    }
+
+    path = results_dir / "summary.json"
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return path
+
+
 # -----------------------------------------------------------------------------
 # Core (no FireWorks)
 # -----------------------------------------------------------------------------
-
 @commands.command("run")
 def run_cmd(
     config: Path = typer.Argument(
@@ -184,7 +224,7 @@ def run_cmd(
         readable=True,
         help="Path to optimization specs (YAML/JSON).",
     ),
-    outdir: Optional[Path] = typer.Option(
+    outdir: Path | None = typer.Option(
         None,
         "--outdir",
         "-o",
@@ -201,7 +241,7 @@ def run_cmd(
     Outputs:
       <outdir>/results.jsonl
       <outdir>/summary.json
-      <outdir>/runs/<run_id>/c000000/...
+      <outdir>/runs/<run_id>/...
     """
     config_abs = config.expanduser().resolve()
     results_dir = _resolve_results_dir(config_abs, outdir)
@@ -225,7 +265,7 @@ def evaluate_cmd(
         readable=True,
         help="Path to optimization specs (YAML/JSON).",
     ),
-    outdir: Optional[Path] = typer.Option(
+    outdir: Path | None = typer.Option(
         None,
         "--outdir",
         "-o",
@@ -236,8 +276,8 @@ def evaluate_cmd(
     ),
     run_id: str = typer.Option("manual", "--run-id", help="Run id used to build the workdir path."),
     candidate_id: str = typer.Option("manual", "--candidate-id", help="Candidate id used to build the workdir path."),
-    param: List[str] = typer.Option([], "--param", "-p", help="Override parameter as NAME=VALUE (repeatable)."),
-    params_file: Optional[Path] = typer.Option(None, "--params-file", help="JSON file with parameter overrides."),
+    param: list[str] = typer.Option([], "--param", "-p", help="Override parameter as NAME=VALUE (repeatable)."),
+    params_file: Path | None = typer.Option(None, "--params-file", help="JSON file with parameter overrides."),
 ):
     """
     Evaluate a single candidate (useful for debugging external evaluators).
@@ -247,7 +287,7 @@ def evaluate_cmd(
 
     problem = load_problem_config(config_abs)
 
-    overrides: Dict[str, Any] = {}
+    overrides: dict[str, Any] = {}
     if params_file is not None:
         data = json.loads(params_file.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -281,9 +321,9 @@ def evaluate_cmd(
 def best_cmd(
     results_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True, help="Results dir (<outdir>)."),
     top: int = typer.Option(1, "--top", "-n", min=1, help="Show top N candidates."),
-    config: Optional[Path] = typer.Option(None, "--config", help="Optimization specs (YAML/JSON) to read objective direction."),
-    direction: Optional[str] = typer.Option(None, "--direction", help="Override objective direction: minimize or maximize."),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="If set, read runs/<run_id>/results.jsonl instead of <outdir>/results.jsonl."),
+    config: Path | None = typer.Option(None, "--config", help="Optimization specs (YAML/JSON) to read objective direction."),
+    direction: str | None = typer.Option(None, "--direction", help="Override objective direction: minimize or maximize."),
+    run_id: str | None = typer.Option(None, "--run-id", help="If set, read runs/<run_id>/results.jsonl instead of <outdir>/results.jsonl."),
 ):
     """
     Show the best candidate(s).
@@ -293,10 +333,7 @@ def best_cmd(
       - <outdir>/runs/<run_id>/results.jsonl if --run-id is provided.
     """
     results_dir = results_dir.expanduser().resolve()
-    if run_id:
-        results_path = results_dir / "runs" / run_id / "results.jsonl"
-    else:
-        results_path = results_dir / "results.jsonl"
+    results_path = results_dir / "runs" / run_id / "results.jsonl" if run_id else results_dir / "results.jsonl"
 
     if not results_path.exists():
         raise typer.BadParameter(f"Could not find results.jsonl at {results_path}")
@@ -305,11 +342,12 @@ def best_cmd(
     if config is not None:
         problem = load_problem_config(config.expanduser().resolve())
         chosen_direction = problem.objective.direction
+
     if direction is not None:
-        direction = direction.strip().lower()
-        if direction not in {"minimize", "maximize"}:
+        direction_norm = direction.strip().lower()
+        if direction_norm not in {"minimize", "maximize"}:
             raise typer.BadParameter("--direction must be 'minimize' or 'maximize'")
-        chosen_direction = direction
+        chosen_direction = direction_norm
 
     ranked = _pick_best(_iter_jsonl(results_path), direction=chosen_direction)
     if not ranked:
@@ -333,12 +371,11 @@ def best_cmd(
 # -----------------------------------------------------------------------------
 # FireWorks backend
 # -----------------------------------------------------------------------------
-
 @fw_app.command("evaluate")
 def fw_evaluate_cmd(
     config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to optimization specs (YAML/JSON)."),
-    launchpad: Optional[Path] = typer.Option(None, "--launchpad", help="Path to my_launchpad.yaml (FireWorks LaunchPad config)."),
-    outdir: Optional[Path] = typer.Option(
+    launchpad: Path | None = typer.Option(None, "--launchpad", help="Path to my_launchpad.yaml (FireWorks LaunchPad config)."),
+    outdir: Path | None = typer.Option(
         None,
         "--outdir",
         "-o",
@@ -349,13 +386,15 @@ def fw_evaluate_cmd(
     ),
     run_id: str = typer.Option("fw-manual", "--run-id", help="Run id used to build the workdir path."),
     candidate_id: str = typer.Option("c000000", "--candidate-id", help="Candidate id used to build the workdir path."),
-    param: List[str] = typer.Option([], "--param", "-p", help="Override parameter as NAME=VALUE (repeatable)."),
-    params_file: Optional[Path] = typer.Option(None, "--params-file", help="JSON file with parameter overrides."),
+    generation_id: int | None = typer.Option(None, "--generation-id", help="Optional generation id for metadata (e.g. 0, 1, 2, ...)."),
+    candidate_index: int | None = typer.Option(None, "--candidate-index", help="Optional candidate index (global) for metadata."),
+    param: list[str] = typer.Option([], "--param", "-p", help="Override parameter as NAME=VALUE (repeatable)."),
+    params_file: Path | None = typer.Option(None, "--params-file", help="JSON file with parameter overrides."),
     launch: bool = typer.Option(False, "--launch/--no-launch", help="Launch immediately (rapidfire) after submitting."),
-    launch_dir: Optional[Path] = typer.Option(
+    launch_dir: Path | None = typer.Option(
         None,
         "--launch-dir",
-        help="Directory to place FireWorks launcher_* dirs (default: <outdir>/launchers).",
+        help="Directory for FireWorks launcher_* dirs (default: <outdir>/runs/<run_id>/launchers).",
     ),
     sleep: int = typer.Option(0, "--sleep", help="Seconds to sleep between rocket launches (rapidfire)."),
     nlaunches: int = typer.Option(0, "--nlaunches", help="Max launches for rapidfire (0 means until queue empty)."),
@@ -363,7 +402,7 @@ def fw_evaluate_cmd(
     """
     Submit a single-candidate evaluation workflow to FireWorks (optionally launch).
     """
-    overrides: Dict[str, Any] = {}
+    overrides: dict[str, Any] = {}
     if params_file is not None:
         data = json.loads(params_file.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -375,18 +414,16 @@ def fw_evaluate_cmd(
         from fireworks.core.rocket_launcher import rapidfire
         from gow.fw.launchpad import load_launchpad
         from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
-    except RuntimeError as e:
-        raise typer.BadParameter(str(e)) from e
     except Exception as e:
         raise typer.BadParameter(str(e)) from e
 
     config_abs = config.expanduser().resolve()
     results_dir = _resolve_results_dir(config_abs, outdir)
 
-    problem = load_problem_config(config_abs)
-    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else default_launchers_dir(results_dir))
-
+    _ = load_problem_config(config_abs)  # validate config early
     lp = load_launchpad(launchpad)
+
+    launchers_dir = launch_dir.expanduser().resolve() if launch_dir else run_launchers_dir(results_dir, run_id)
 
     spec = SingleEvalSpec(
         problem_config=config_abs,
@@ -394,6 +431,8 @@ def fw_evaluate_cmd(
         run_id=run_id,
         candidate_id=candidate_id,
         candidate_params=overrides,
+        generation_id=generation_id,
+        candidate_index=candidate_index,
     )
     wf = build_single_evaluate_workflow(spec)
 
@@ -413,8 +452,8 @@ def fw_evaluate_cmd(
 @fw_app.command("run")
 def fw_run_cmd(
     config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True, help="Path to optimization specs (YAML/JSON)."),
-    launchpad: Optional[Path] = typer.Option(None, "--launchpad", help="Path to my_launchpad.yaml (FireWorks LaunchPad config)."),
-    outdir: Optional[Path] = typer.Option(
+    launchpad: Path | None = typer.Option(None, "--launchpad", help="Path to my_launchpad.yaml (FireWorks LaunchPad config)."),
+    outdir: Path | None = typer.Option(
         None,
         "--outdir",
         "-o",
@@ -423,12 +462,12 @@ def fw_run_cmd(
             "explicit --outdir, else $GOW_OUTDIR, else <config_dir>/results."
         ),
     ),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run id (defaults to UUID)."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run id (defaults to UUID)."),
     launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch immediately (rapidfire) after submitting."),
-    launch_dir: Optional[Path] = typer.Option(
+    launch_dir: Path | None = typer.Option(
         None,
         "--launch-dir",
-        help="Directory to place FireWorks launcher_* dirs (default: <outdir>/launchers).",
+        help="Directory for FireWorks launcher_* dirs (default: <outdir>/runs/<run_id>/launchers).",
     ),
     sleep: int = typer.Option(0, "--sleep", help="Seconds to sleep between rocket launches (rapidfire)."),
     nlaunches: int = typer.Option(0, "--nlaunches", help="Max launches for rapidfire (0 means until queue empty)."),
@@ -443,8 +482,6 @@ def fw_run_cmd(
         from gow.fw.launchpad import load_launchpad
         from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
         from gow.optimizer import make_optimizer
-    except RuntimeError as e:
-        raise typer.BadParameter(str(e)) from e
     except Exception as e:
         raise typer.BadParameter(str(e)) from e
 
@@ -455,7 +492,7 @@ def fw_run_cmd(
     lp = load_launchpad(launchpad)
 
     run_id_val = run_id or _default_run_id()
-    launchers_dir = (launch_dir.expanduser().resolve() if launch_dir else default_launchers_dir(results_dir))
+    launchers_dir = launch_dir.expanduser().resolve() if launch_dir else run_launchers_dir(results_dir, run_id_val)
 
     opt_cfg = problem.optimizer
     opt_kwargs = _optimizer_kwargs(opt_cfg)
@@ -472,24 +509,32 @@ def fw_run_cmd(
 
     optimizer = make_optimizer(opt_cfg.name, seed=opt_cfg.seed, **opt_kwargs)
 
+    direction = str(problem.objective.direction).strip().lower()
+    if direction not in {"minimize", "maximize"}:
+        direction = "minimize"
+
     typer.echo(f"Problem: {problem.id}")
     typer.echo(f"run_id:  {run_id_val}")
     typer.echo(f"results_dir: {results_dir}")
     typer.echo(f"launchers_dir: {launchers_dir}")
     typer.echo(f"max_evaluations={opt_cfg.max_evaluations}  batch_size={opt_cfg.batch_size}")
 
-    def _read_candidate_fitness(workdir: Path) -> Dict[str, Any]:
+    def _read_candidate_record(workdir: Path) -> dict[str, Any] | None:
+        """
+        Read <workdir>/result.json written by EvaluateCandidateTask.
+
+        Returns the full record dict, or None if missing/unreadable.
+        """
         result_path = workdir / "result.json"
         if not result_path.exists():
-            return {"status": "failed", "error": f"Missing result.json at {result_path}"}
+            return None
         try:
-            rec = json.loads(result_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            return {"status": "failed", "error": f"Failed to parse result.json: {e}"}
-        fit = (rec.get("fitness") or {})
-        if "status" not in fit:
-            fit["status"] = "failed"
-        return fit
+            return json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    best_obj: float | None = None
+    best_info: dict[str, Any] | None = None
 
     n_done = 0
     while n_done < opt_cfg.max_evaluations:
@@ -498,9 +543,9 @@ def fw_run_cmd(
 
         candidates = optimizer.ask(problem, n_batch)
 
-        candidate_ids: List[str] = []
+        candidate_ids: list[str] = []
         for i, cand in enumerate(candidates):
-            idx = n_done + i
+            idx = n_done + i  # global index
             candidate_id = format_candidate_id(generation_id=generation_id, candidate_index=idx)
             candidate_ids.append(candidate_id)
 
@@ -510,6 +555,8 @@ def fw_run_cmd(
                 run_id=run_id_val,
                 candidate_id=candidate_id,
                 candidate_params=cand,
+                generation_id=generation_id,
+                candidate_index=idx,
             )
             wf = build_single_evaluate_workflow(spec)
             lp.add_wf(wf)
@@ -521,10 +568,44 @@ def fw_run_cmd(
                 rapidfire(lp, nlaunches=nlaunches, sleep_time=sleep)
             typer.echo("Launch complete for current queue.")
 
-        fitness_dicts: List[Dict[str, Any]] = []
-        for candidate_id in candidate_ids:
+        # IMPORTANT:
+        # - tell() uses fitness in the *same order* as `candidates`
+        # - best_info MUST be derived from the evaluated record/result to avoid mismatches
+        fitness_dicts: list[dict[str, Any]] = []
+        for i, candidate_id in enumerate(candidate_ids):
             workdir = candidate_workdir(results_dir, run_id_val, candidate_id)
-            fitness_dicts.append(_read_candidate_fitness(workdir))
+            rec = _read_candidate_record(workdir)
+
+            if rec is None:
+                fit: dict[str, Any] = {"status": "failed", "error": f"Missing/unreadable result.json at {workdir / 'result.json'}"}
+            else:
+                fit = (rec.get("fitness") or {}) if isinstance(rec.get("fitness"), dict) else {}
+                if "status" not in fit:
+                    fit["status"] = "failed"
+
+            fitness_dicts.append(fit)
+
+            obj_val = _coerce_objective(fit)
+            if obj_val is None:
+                continue
+
+            if best_obj is None or _is_better(obj_val, best_obj, direction):
+                best_obj = obj_val
+
+                # Prefer evaluated record params (guaranteed consistent with objective).
+                # Fall back to the asked candidate only if needed.
+                params = None
+                if rec is not None and isinstance(rec.get("params"), dict):
+                    params = rec["params"]
+                else:
+                    params = candidates[i] if isinstance(candidates[i], dict) else {"candidate": candidates[i]}
+
+                best_info = {
+                    "candidate_id": candidate_id,
+                    "generation_id": generation_id,
+                    "objective": obj_val,
+                    "params": params,
+                }
 
         try:
             optimizer.tell(candidates, fitness_dicts)
@@ -533,10 +614,20 @@ def fw_run_cmd(
 
         n_done += n_batch
 
+    summary_path = _write_summary_json(
+        results_dir=results_dir,
+        problem_id=problem.id,
+        run_id=run_id_val,
+        max_evaluations=opt_cfg.max_evaluations,
+        direction=direction,
+        best_candidate=best_info,
+    )
+
     typer.echo("Done.")
     typer.echo(f"Results dir: {results_dir}")
     typer.echo(f"Results.jsonl: {results_dir / 'results.jsonl'}")
     typer.echo(f"Run results.jsonl: {run_root(results_dir, run_id_val) / 'results.jsonl'}")
+    typer.echo(f"Summary: {summary_path}")
     typer.echo(f"Launchers dir: {launchers_dir}")
 
 

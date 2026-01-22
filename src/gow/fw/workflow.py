@@ -34,6 +34,11 @@ class SingleEvalSpec:
     run_id: str
     candidate_id: str
     candidate_params: Dict[str, Any]
+
+    # Optional metadata (useful for analysis and parity with local mode)
+    generation_id: Optional[int] = None
+    candidate_index: Optional[int] = None
+
     context_override: Optional[Dict[str, Any]] = None
 
 
@@ -57,6 +62,9 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
         "run_id": spec.run_id,
         "candidate_id": spec.candidate_id,
         "candidate_params": _to_jsonable(spec.candidate_params),
+        # propagate metadata for parity with local mode
+        "generation_id": spec.generation_id,
+        "candidate_index": spec.candidate_index,
     }
     if spec.context_override:
         eval_task_params["context_override"] = _to_jsonable(spec.context_override)
@@ -66,6 +74,9 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
         "problem_id": problem.id,
         "run_id": spec.run_id,
         "candidate_id": spec.candidate_id,
+        # propagate metadata for parity with local mode
+        "generation_id": spec.generation_id,
+        "candidate_index": spec.candidate_index,
     }
 
     # Single FireWork containing both tasks in sequence.
@@ -75,7 +86,13 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
             AppendResultJsonlTask(append_task_params),
         ],
         name=f"evaluate+append:{problem.id}:{spec.run_id}:{spec.candidate_id}",
-        spec={"problem_id": problem.id, "run_id": spec.run_id, "candidate_id": spec.candidate_id},
+        spec={
+            "problem_id": problem.id,
+            "run_id": spec.run_id,
+            "candidate_id": spec.candidate_id,
+            "generation_id": spec.generation_id,
+            "candidate_index": spec.candidate_index,
+        },
     )
 
     wf_name = f"gow-single-eval:{problem.id}:{spec.run_id}:{spec.candidate_id}"
