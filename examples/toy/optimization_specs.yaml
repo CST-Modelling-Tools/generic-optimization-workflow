@@ -1,4 +1,4 @@
-id: toy-sphere
+id: toy-sphere-de
 
 objective:
   direction: minimize
@@ -17,13 +17,12 @@ parameters:
   n:
     type: int
     value: 5
-    bounds: [1, 10]
     optimizable: false
 
   mode:
     type: categorical
     value: a
-    choices: [a, b, c]
+    optimizable: false
 
 evaluator:
   command: ["{python}", "../../tests/toy_eval.py"]
@@ -32,10 +31,15 @@ evaluator:
     OMP_NUM_THREADS: "1"
 
 optimizer:
-  name: random_search
+  name: differential_evolution
   seed: 123
-  max_evaluations: 20
-  batch_size: 4
+  max_evaluations: 500
+  batch_size: 50
+
+  settings:
+    mutation_factor: 0.8
+    crossover_rate: 0.9
+    max_generations: 10
 
 context:
-  note: toy example (YAML)
+  note: "toy example using Differential Evolution"
