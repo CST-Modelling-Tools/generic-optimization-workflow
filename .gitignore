@@ -220,3 +220,7 @@ CMakeFiles/
 runs/
 
 results/
+
+# Ignore all result directories under examples
+/examples/**/results*/
+
