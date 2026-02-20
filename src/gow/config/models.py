@@ -149,7 +149,7 @@ class ProblemConfig(BaseModel):
     """
     Top-level configuration for an optimization problem.
     """
-    id: str = Field(..., description="Problem identifier, e.g. sunpos-mica or heliostat-optics.")
+    id: str = Field(..., description="Problem identifier, e.g. heliostat-optics.")
     parameters: Dict[str, Parameter]
     evaluator: ExternalEvaluatorConfig
     objective: ObjectiveConfig = Field(default_factory=ObjectiveConfig)

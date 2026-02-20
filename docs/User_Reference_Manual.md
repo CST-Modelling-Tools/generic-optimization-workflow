@@ -1,420 +1,256 @@
 # Generic Optimization Workflow (GOW)
-## User & Reference Manual
 
-This document is the **authoritative user-facing documentation** for the Generic Optimization Workflow (GOW).
-It reflects the **current, working codebase and CLI**
+## User Reference Manual
 
----
+------------------------------------------------------------------------
 
 ## 1. Overview
 
-### 1.1 Purpose
+The **Generic Optimization Workflow (GOW)** provides a structured and
+reproducible way to define and execute optimization problems.
 
-The **Generic Optimization Workflow (GOW)** is a lightweight, problem-agnostic framework for running numerical
-optimization campaigns over **black-box evaluators**.
+A problem configuration:
 
-GOW provides:
-- orchestration of optimization loops,
-- structured evaluation of candidates,
-- robust and reproducible result storage,
-- optional distributed execution using FireWorks and MongoDB.
+-   Defines parameters (real, int, categorical)
+-   Specifies how candidates are evaluated
+-   Configures the optimizer
+-   Defines objective direction
+-   Stores optional contextual metadata
 
-GOW deliberately does **not** implement domain logic or solvers. Evaluators are external programs or scripts
-supplied by the user.
+This manual uses a **toy polynomial regression example** to illustrate
+the configuration format.
 
----
+------------------------------------------------------------------------
 
-### 1.2 Philosophy
+## 2. Toy Example Problem
 
-- **Framework, not project runner** – optimization projects live outside the GOW repository  
-- **Declarative configuration** – problems are described via YAML or JSON  
-- **Black-box evaluators** – GOW does not introspect user code  
-- **Identical semantics locally and distributed** – same layout, same results  
+We optimize a simple polynomial model:
 
----
+f(x) = k1 \* x + k2 \* x\^2
 
-## 2. Architecture
+The optimizer searches for the best parameters:
 
-```mermaid
-flowchart TD
-    A[User Project Directory] --> B[GOW CLI]
-    B --> C[Optimizer]
-    C --> D[Evaluator]
-    D --> E[Results]
-    C -.-> F[FireWorks + MongoDB]
-    F -.-> D
+-   `k1`
+-   `k2`
+-   `n_terms`
+
+to minimize the mean squared error on a synthetic dataset.
+
+------------------------------------------------------------------------
+
+## 3. Evaluator Contract
+
+Every external evaluator must follow this contract.
+
+### Input (`input.json`)
+
+``` json
+{
+  "run_id": "7c3f3a2a-7c40-4c7b-b9c6-5b02f3b6c6d0",
+  "candidate_id": "c000123",
+  "params": {
+    "k1": 0.123,
+    "k2": -1.2,
+    "n_terms": 14
+  },
+  "context": {
+    "problem": "toy_polynomial_regression",
+    "dataset": "synthetic_v1",
+    "seed": 42
+  }
+}
 ```
 
----
+### Output (`output.json`)
 
-## 3. Installation
-
-### 3.1 Requirements
-
-- Python **3.10+**
-- pip
-- Git
-
-Optional:
-- MongoDB (for FireWorks execution)
-- FireWorks
-
----
-
-### 3.2 Installation (Linux / macOS)
-
-```bash
-git clone <repository-url>
-cd generic-optimization-workflow
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+``` json
+{
+  "objective": 0.04231,
+  "metrics": {
+    "mse": 0.04231
+  },
+  "artifacts": {}
+}
 ```
 
-Optional FireWorks support:
+### Required Fields
 
-```bash
-pip install -e ".[fireworks]"
+  Field       Required   Description
+  ----------- ---------- -----------------------------
+  objective   Yes        Scalar objective value
+  metrics     No         Optional diagnostic metrics
+  artifacts   No         Optional output artifacts
+
+------------------------------------------------------------------------
+
+## 4. Configuration Schema
+
+The following Pydantic schema defines the structure of a GOW problem.
+
+``` python
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Union
+
+from pydantic import BaseModel, Field, model_validator
+
+
+ParamType = Literal["real", "int", "categorical"]
+
+
+class BaseParam(BaseModel):
+    type: ParamType
+    value: Any
+    description: Optional[str] = None
+    optimizable: bool = True
+
+
+class RealParam(BaseParam):
+    type: Literal["real"] = "real"
+    value: float
+    bounds: Optional[List[float]] = Field(default=None, min_length=2, max_length=2)
+
+    @model_validator(mode="after")
+    def _validate_bounds(self):
+        if self.optimizable and self.bounds is None:
+            raise ValueError("RealParam.bounds is required when optimizable is true")
+        return self
+
+
+class IntParam(BaseParam):
+    type: Literal["int"] = "int"
+    value: int
+    bounds: Optional[List[int]] = Field(default=None, min_length=2, max_length=2)
+
+    @model_validator(mode="after")
+    def _validate_bounds(self):
+        if self.optimizable and self.bounds is None:
+            raise ValueError("IntParam.bounds is required when optimizable is true")
+        return self
+
+
+class CategoricalParam(BaseParam):
+    type: Literal["categorical"] = "categorical"
+    value: str
+    choices: Optional[List[str]] = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_choices(self):
+        if self.optimizable:
+            if not self.choices:
+                raise ValueError("CategoricalParam.choices is required when optimizable is true")
+            if self.value not in self.choices:
+                raise ValueError("CategoricalParam.value must be one of choices")
+        return self
+
+
+Parameter = Union[RealParam, IntParam, CategoricalParam]
+
+
+class ExternalEvaluatorConfig(BaseModel):
+    command: List[str]
+    timeout_s: int = 600
+    extra_args: List[str] = []
+    env: Dict[str, str] = {}
+
+
+ObjectiveDirection = Literal["minimize", "maximize"]
+
+
+class ObjectiveConfig(BaseModel):
+    direction: ObjectiveDirection = "minimize"
+
+
+class OptimizerConfig(BaseModel):
+    name: str = "random_search"
+    seed: Optional[int] = None
+    max_evaluations: int = 100
+    batch_size: int = 4
+    settings: Dict[str, Any] = {}
+
+
+class ProblemConfig(BaseModel):
+    id: str
+    parameters: Dict[str, Parameter]
+    evaluator: ExternalEvaluatorConfig
+    objective: ObjectiveConfig = ObjectiveConfig()
+    optimizer: OptimizerConfig = OptimizerConfig()
+    context: Dict[str, Any] = {}
+    source_path: Optional[Path] = None
+
+    def runtime_params(self):
+        return {name: p.value for name, p in self.parameters.items()}
+
+    def optimizable_parameters(self):
+        return {
+            name: p
+            for name, p in self.parameters.items()
+            if getattr(p, "optimizable", True)
+        }
 ```
 
----
+------------------------------------------------------------------------
 
-### 3.3 Installation (Windows)
+## 5. Example `project_config.json`
 
-```powershell
-git clone <repository-url>
-cd generic-optimization-workflow
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e .
+``` json
+{
+  "id": "toy-polynomial-regression",
+  "parameters": {
+    "k1": {
+      "type": "real",
+      "value": 0.0,
+      "bounds": [-5.0, 5.0],
+      "optimizable": true,
+      "description": "Linear coefficient"
+    },
+    "k2": {
+      "type": "real",
+      "value": 0.0,
+      "bounds": [-5.0, 5.0],
+      "optimizable": true,
+      "description": "Quadratic coefficient"
+    },
+    "n_terms": {
+      "type": "int",
+      "value": 2,
+      "bounds": [1, 10],
+      "optimizable": true,
+      "description": "Number of polynomial terms"
+    }
+  },
+  "evaluator": {
+    "command": ["{python}", "toy_evaluator.py"],
+    "timeout_s": 300
+  },
+  "objective": {
+    "direction": "minimize"
+  },
+  "optimizer": {
+    "name": "random_search",
+    "seed": 42,
+    "max_evaluations": 50,
+    "batch_size": 4
+  },
+  "context": {
+    "problem": "toy_polynomial_regression",
+    "dataset": "synthetic_v1",
+    "seed": 42
+  }
+}
 ```
 
-Optional FireWorks support:
+------------------------------------------------------------------------
 
-```powershell
-pip install -e ".[fireworks]"
-```
+## 6. Summary
 
----
+This manual:
 
-## 4. Recommended Project Layout
+-   Uses a clear toy regression example
+-   Demonstrates the structured parameter system
+-   Documents the evaluator contract
+-   Aligns with the fully structured configuration format
 
-Each optimization project lives **outside** the GOW repository.
-
-```
-my-optimization-project/
-├── problem.yaml
-└── results/
-```
-
-- `problem.yaml`: optimization problem definition
-- `results/`: automatically generated artifacts
-
----
-
-## 5. Problem Configuration (`problem.yaml`)
-
-### 5.1 Conceptual Model
-
-A GOW optimization problem consists of:
-
-1. **Problem identity**
-2. **Parameters** (optimizable and fixed)
-3. **Objective**
-4. **Evaluator**
-5. **Optimizer configuration**
-6. **Optional context metadata**
-
-```mermaid
-flowchart LR
-    P[Parameters] --> E[Evaluator]
-    E --> O[Objective]
-    O --> OPT[Optimizer]
-    OPT --> P
-```
-
----
-
-### 5.2 Problem Identity
-
-```yaml
-id: toy-sphere
-```
-
-- Filesystem-friendly, stable identifier
-- Used to name `results/<problem_id>/`
-
-Best practices:
-- lowercase
-- hyphen-separated
-- stable across runs
-
----
-
-### 5.3 Parameters
-
-Parameters define all values passed to the evaluator.
-
-Two categories:
-- **Optimizable parameters** (decision variables)
-- **Fixed / runtime parameters** (constants)
-
-Common fields:
-- `type`: `real`, `int`, `bool`, `str` / `categorical`
-- `value`: default or fixed value
-- `bounds` or `choices`: search space
-- `optimizable`: true / false (optional)
-- optional metadata (`description`, `units`, etc.)
-
-#### Continuous parameter
-
-```yaml
-x:
-  type: real
-  value: 0.1
-  bounds: [-5.0, 5.0]
-```
-
-#### Integer parameter
-
-```yaml
-n:
-  type: int
-  value: 5
-  bounds: [1, 10]
-  optimizable: false
-```
-
-#### Categorical parameter
-
-```yaml
-mode:
-  type: categorical
-  value: a
-  choices: [a, b, c]
-```
-
-#### Boolean parameter
-
-```yaml
-use_cache:
-  type: bool
-  value: true
-```
-
-All parameters (optimized or not) are written to `input.json` and recorded in results.
-
----
-
-### 5.4 Objective
-
-The objective defines:
-- optimization direction (`minimize` or `maximize`)
-- a single scalar fitness value
-
-Evaluators may compute many metrics, but only one objective is used for ranking.
-
----
-
-### 5.5 Evaluator
-
-The evaluator defines **how a candidate is evaluated**.
-
-Typical contract:
-1. GOW creates a candidate work directory
-2. Writes `input.json`
-3. Executes the evaluator command
-4. Reads machine-readable output (e.g. `output.json`)
-5. Records status, objective, metrics
-
-Example:
-
-```yaml
-evaluator:
-  command: ["{python}", "../../tests/toy_eval.py"]
-  timeout_s: 60
-  env:
-    OMP_NUM_THREADS: "1"
-```
-
-Key features:
-- command is a list (cross-platform)
-- `{python}` resolves to the active interpreter
-- optional timeout protection
-- optional environment variables
-
-Each candidate directory contains:
-- `input.json`
-- `output.json`
-- `stdout.txt`
-- `stderr.txt`
-- `result.json`
-
----
-
-### 5.6 Failures, Constraints, and Metrics
-
-If evaluation fails:
-- status should be `failed`
-- objective may be null
-- error message should be provided
-
-Constraints are typically enforced inside the evaluator:
-- hard failure
-- penalty-based objective
-- or separate constraint metrics
-
-Multiple metrics can be stored for analysis even if only one objective is optimized.
-
----
-
-### 5.7 Optimizer Configuration
-
-Typical fields:
-- `name`
-- `seed`
-- `max_evaluations`
-- `batch_size`
-
-Batch size controls:
-- grouping of evaluations locally
-- submission granularity with FireWorks
-
----
-
-### 5.8 Context Metadata (Optional)
-
-```yaml
-context:
-  note: toy example
-  author: user
-```
-
-Context is arbitrary metadata:
-- not optimized
-- passed through for traceability
-- stored with results
-
----
-
-## 6. Toy Example (Self-Contained)
-
-```yaml
-id: toy-sphere
-
-objective:
-  direction: minimize
-
-parameters:
-  x:
-    type: real
-    value: 0.1
-    bounds: [-5.0, 5.0]
-
-  y:
-    type: real
-    value: -0.2
-    bounds: [-5.0, 5.0]
-
-evaluator:
-  command: ["{python}", "../../tests/toy_eval.py"]
-  timeout_s: 60
-
-optimizer:
-  name: random_search
-  seed: 123
-  max_evaluations: 20
-  batch_size: 4
-
-context:
-  note: toy example
-```
-
----
-
-## 7. Running Locally
-
-```bash
-gow run problem.yaml
-```
-
-Produces:
-
-```
-results/
-  toy-sphere/
-    results.jsonl
-    summary.json
-    runs/
-      <run_id>/
-        results.jsonl
-        summary.json
-        c000000/
-        ...
-```
-
----
-
-## 8. Single-Candidate Evaluation
-
-```bash
-gow evaluate problem.yaml   --run-id debug   -p x=0.2 -p y=0.4
-```
-
-Useful for debugging evaluators and parameter mappings.
-
----
-
-## 9. Inspecting Results
-
-```bash
-gow best results/toy-sphere/runs/<run_id>
-```
-
----
-
-## 10. Distributed Execution with FireWorks
-
-```bash
-gow fw run problem.yaml --launchpad my_launchpad.yaml
-rlaunch rapidfire
-```
-
-FireWorks:
-- provides parallelism and fault tolerance
-- uses MongoDB-backed task queue
-- preserves the same results layout
-
----
-
-## 11. Environment Variables
-
-Override results directory:
-
-```bash
-export GOW_OUTDIR=/path/to/results
-```
-
-Windows:
-
-```powershell
-$env:GOW_OUTDIR="D:\results"
-```
-
----
-
-## 12. Recommended User Workflow
-
-1. Create project directory
-2. Write `problem.yaml`
-3. Validate with `gow evaluate`
-4. Run locally with `gow run`
-5. Scale with `gow fw run`
-
----
-
-## 13. Summary
-
-The Generic Optimization Workflow provides a clean, extensible, and reproducible framework
-for optimization problems, from toy examples to large distributed campaigns, without
-changing user-facing semantics.
+The Generic Optimization Workflow is designed to be simple, extensible,
+and fully reproducible.
