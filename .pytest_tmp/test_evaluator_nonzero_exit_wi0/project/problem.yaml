@@ -1,4 +1,4 @@
-id: toy-manual-fallback
+id: toy-nonzero-exit
 objective:
   direction: minimize
 parameters:
@@ -8,16 +8,10 @@ parameters:
     bounds:
     - -1.0
     - 1.0
-  y:
-    type: real
-    value: 0.0
-    bounds:
-    - -1.0
-    - 1.0
 evaluator:
   command:
   - '{python}'
-  - D:\OpenSource\generic-optimization-workflow\tests\toy_eval.py
+  - D:\OpenSource\generic-optimization-workflow\.pytest_tmp\test_evaluator_nonzero_exit_wi0\project\bad_exit_eval.py
   timeout_s: 30
 optimizer:
   name: random_search

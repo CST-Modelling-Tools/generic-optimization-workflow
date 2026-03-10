@@ -4,6 +4,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -16,6 +17,9 @@ class ExternalRunResult:
     fitness: FitnessResult
     returncode: int
     wall_time_s: float
+    started_at: str
+    finished_at: str
+    evaluator: Dict[str, object]
     stdout_path: Path
     stderr_path: Path
     input_path: Path
@@ -25,6 +29,10 @@ class ExternalRunResult:
 
 class EvaluatorExecutionError(RuntimeError):
     pass
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def run_external_evaluator(
@@ -72,14 +80,21 @@ def run_external_evaluator(
     )
 
     cmd = list(command)
-    cmd.extend(["--input", input_filename, "--output", output_filename])
     if extra_args:
         cmd.extend(extra_args)
+    cmd.extend(["--input", input_filename, "--output", output_filename])
+
+    evaluator_metadata: Dict[str, object] = {
+        "resolved_command": list(cmd),
+        "timeout_s": timeout_s,
+        "extra_args": list(extra_args or []),
+    }
 
     proc_env = os.environ.copy()
     if env:
         proc_env.update({str(k): str(v) for k, v in env.items()})
 
+    started_at = _utc_now_iso()
     t0 = time.time()
     try:
         with stdout_path.open("w", encoding="utf-8") as f_out, stderr_path.open("w", encoding="utf-8") as f_err:
@@ -94,22 +109,37 @@ def run_external_evaluator(
                 text=True,
             )
         wall = time.time() - t0
+        finished_at = _utc_now_iso()
 
         # Try to parse evaluator output.json if it exists
         if output_path.exists():
-            fitness = read_output_json(output_path)
+            try:
+                fitness = read_output_json(output_path)
+            except Exception as exc:
+                fitness = FitnessResult(
+                    status="failed",
+                    metrics={},
+                    objective=None,
+                    error=f"Evaluator produced invalid {output_filename}: {exc}",
+                    failure_kind="invalid_output",
+                )
         else:
+            failure_kind = "missing_output" if completed.returncode == 0 else "nonzero_exit"
             fitness = FitnessResult(
                 status="failed",
                 metrics={},
                 objective=None,
                 error=f"Evaluator did not produce {output_filename}. Return code: {completed.returncode}",
+                failure_kind=failure_kind,
             )
 
         return ExternalRunResult(
             fitness=fitness,
             returncode=completed.returncode,
             wall_time_s=wall,
+            started_at=started_at,
+            finished_at=finished_at,
+            evaluator=evaluator_metadata,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             input_path=input_path,
@@ -119,6 +149,7 @@ def run_external_evaluator(
 
     except subprocess.TimeoutExpired:
         wall = time.time() - t0
+        finished_at = _utc_now_iso()
         # best effort: record a failure fitness
         fitness = FitnessResult(
             status="failed",
@@ -126,11 +157,15 @@ def run_external_evaluator(
             objective=None,
             error=f"Evaluator timed out after {timeout_s} seconds",
             constraints={"timeout_s": timeout_s, "wall_time_s": wall},
+            failure_kind="timeout",
         )
         return ExternalRunResult(
             fitness=fitness,
             returncode=124,
             wall_time_s=wall,
+            started_at=started_at,
+            finished_at=finished_at,
+            evaluator=evaluator_metadata,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             input_path=input_path,

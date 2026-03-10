@@ -14,6 +14,7 @@ class FitnessResult(BaseModel):
     - constraints: optional dict (runtime, feasibility, etc.)
     - artifacts: optional dict of relative paths (files produced)
     - error: optional error message
+    - failure_kind: optional machine-readable failure category
     """
     status: str = Field(..., pattern=r"^(ok|failed)$")
     metrics: Dict[str, Any] = Field(default_factory=dict)
@@ -21,3 +22,4 @@ class FitnessResult(BaseModel):
     constraints: Dict[str, Any] = Field(default_factory=dict)
     artifacts: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
+    failure_kind: Optional[str] = None

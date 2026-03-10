@@ -1,0 +1,13 @@
+{
+  "best": null,
+  "max_evaluations": 1,
+  "objective": {
+    "direction": "minimize"
+  },
+  "outdir": "D:\\OpenSource\\generic-optimization-workflow\\.pytest_tmp\\test_evaluator_timeout_is_reco0\\out",
+  "problem_id": "toy-timeout",
+  "results_file": "D:\\OpenSource\\generic-optimization-workflow\\.pytest_tmp\\test_evaluator_timeout_is_reco0\\out\\results.jsonl",
+  "run_id": "test-run-timeout",
+  "run_results_file": "D:\\OpenSource\\generic-optimization-workflow\\.pytest_tmp\\test_evaluator_timeout_is_reco0\\out\\runs\\test-run-timeout\\results.jsonl",
+  "run_root": "D:\\OpenSource\\generic-optimization-workflow\\.pytest_tmp\\test_evaluator_timeout_is_reco0\\out\\runs\\test-run-timeout"
+}

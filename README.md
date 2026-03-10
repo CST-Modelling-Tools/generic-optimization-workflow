@@ -149,7 +149,7 @@ status: "ok" or "failed"
 
 metrics: object of named metrics (floats/ints)
 
-objective: optional scalar (float) for single-objective optimization
+objective: scalar used by the optimizer for single-objective optimization
 
 constraints: optional object (e.g., runtime, feasibility flags)
 
@@ -174,9 +174,22 @@ Notes:
 
 - `metrics` is the general container for evaluator outputs.
 - `objective` is the single scalar value the optimizer compares when selecting the best candidate.
+- successful optimizable evaluations should provide `objective`.
+- failed evaluations may omit `objective` or set it to `null`.
 - `objective` may duplicate one metric, but it has a distinct role in optimization and provenance.
 
-### 6) Failure behaviour
+### 6) GOW Provenance Records
+
+GOW stores richer provenance alongside evaluator output in `result.json` and `results.jsonl`.
+These records include:
+
+- `failure_kind`: machine-readable failure category when GOW detects a failure mode such as
+  `missing_output`, `timeout`, `nonzero_exit`, or `invalid_output`
+- `started_at` / `finished_at`: UTC timestamps in ISO 8601 format
+- `wall_time_s`: elapsed execution time in seconds
+- `evaluator`: a small execution snapshot with the resolved command, timeout, and extra args
+
+### 7) Failure behaviour
 
 Evaluators SHOULD attempt to write output.json even when they fail. For failures:
 
@@ -199,7 +212,7 @@ Example:
 
 The optimization framework can then decide how to handle failures (retry, penalize, skip, etc.).
 
-### 7) Current attempt semantics
+### 8) Current attempt semantics
 
 GOW does not currently implement an automatic retry policy in the local or FireWorks runners.
 
@@ -211,7 +224,7 @@ Current behavior:
 - if those metadata are omitted, `gow evaluate` falls back to the explicit non-canonical id `manual`
 - JSONL append logic is keyed by `attempt_id` when available, so repeated executions can be preserved as separate attempts
 
-### 8) Evaluator-internal orchestration is allowed
+### 9) Evaluator-internal orchestration is allowed
 
 An evaluator executable may internally run multiple programs/steps, for example:
 

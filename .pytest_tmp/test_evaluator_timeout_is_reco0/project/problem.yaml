@@ -1,4 +1,4 @@
-id: toy-manual-attempt
+id: toy-timeout
 objective:
   direction: minimize
 parameters:
@@ -8,17 +8,11 @@ parameters:
     bounds:
     - -1.0
     - 1.0
-  y:
-    type: real
-    value: 0.0
-    bounds:
-    - -1.0
-    - 1.0
 evaluator:
   command:
   - '{python}'
-  - D:\OpenSource\generic-optimization-workflow\tests\toy_eval.py
-  timeout_s: 30
+  - D:\OpenSource\generic-optimization-workflow\.pytest_tmp\test_evaluator_timeout_is_reco0\project\slow_eval.py
+  timeout_s: 1
 optimizer:
   name: random_search
   seed: 123

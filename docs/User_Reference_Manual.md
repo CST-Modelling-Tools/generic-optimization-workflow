@@ -116,7 +116,21 @@ Semantics:
 
 - `metrics` is the full evaluator result payload
 - `objective` is the one scalar that optimization compares
+- successful optimizable evaluations should provide `objective`
+- failed evaluations may omit `objective` or set it to `null`
 - the objective may duplicate one metric, but it is still recorded separately
+
+### Provenance record fields
+
+GOW enriches evaluator output when it writes `result.json` and `results.jsonl`.
+These provenance records include:
+
+- `failure_kind`: machine-readable failure category such as `missing_output`,
+  `timeout`, `nonzero_exit`, or `invalid_output`
+- `started_at` and `finished_at`: UTC ISO 8601 timestamps
+- `wall_time_s`: elapsed execution time in seconds
+- `evaluator`: a small structured snapshot containing the resolved command,
+  timeout, and extra args
 
 ### Current attempt semantics
 

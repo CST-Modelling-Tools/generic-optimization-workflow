@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,10 @@ def _read_jsonl(path: Path) -> list[dict]:
                 continue
             rows.append(json.loads(line))
     return rows
+
+
+def _parse_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def test_local_run_smoke_creates_expected_outputs(tmp_path: Path) -> None:
@@ -112,11 +117,22 @@ Path("output.json").write_text(json.dumps(out), encoding="utf-8")
         assert "candidate_local_id" in r
         assert "attempt_id" in r
         assert "fitness" in r
+        assert "evaluator" in r
+        assert "started_at" in r
+        assert "finished_at" in r
         assert isinstance(r["fitness"], dict)
         assert r["fitness"].get("status") in ("ok", "failed")
         assert r["candidate_id"].startswith(f"r{derive_run_token(run_id)}_")
         assert r["candidate_local_id"].startswith("g")
         assert r["attempt_id"] == f"{r['candidate_id']}_a000"
+        assert r["failure_kind"] is None
+        assert isinstance(r["evaluator"], dict)
+        assert r["evaluator"]["timeout_s"] == 30
+        assert isinstance(r["evaluator"]["resolved_command"], list)
+        assert isinstance(r["evaluator"]["extra_args"], list)
+        started_at = _parse_timestamp(r["started_at"])
+        finished_at = _parse_timestamp(r["finished_at"])
+        assert finished_at >= started_at
 
     assert [r["candidate_index"] for r in rows] == list(range(len(rows)))
     assert rows[0]["candidate_local_id"] == "g000000_c000000"
