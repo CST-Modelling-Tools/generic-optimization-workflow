@@ -159,6 +159,11 @@ def run_local_optimization(
                 "output_path": str(res.output_path),
             }
 
+            (workdir / "result.json").write_text(
+                json.dumps(record, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
             append_jsonl_line(run_results_path, record)
             append_jsonl_line(problem_results_path, record)
 

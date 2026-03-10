@@ -53,9 +53,33 @@ def test_parse_candidate_id_supports_run_aware_and_legacy_formats() -> None:
     assert legacy.candidate_local_id == "g000002_c000014"
 
 
+def test_parse_candidate_id_is_flexible_about_width() -> None:
+    run_aware = parse_candidate_id("r7c3f3a2a_g2_c14")
+    legacy = parse_candidate_id("g2_c14")
+
+    assert run_aware is not None
+    assert run_aware.run_token == "7c3f3a2a"
+    assert run_aware.generation_id == 2
+    assert run_aware.candidate_index == 14
+    assert run_aware.candidate_local_id == "g000002_c000014"
+
+    assert legacy is not None
+    assert legacy.generation_id == 2
+    assert legacy.candidate_index == 14
+    assert legacy.candidate_local_id == "g000002_c000014"
+
+
 def test_parse_attempt_id_supports_fixed_width_attempts() -> None:
     parts = parse_attempt_id("r7c3f3a2a_g000002_c000014_a012")
 
     assert parts is not None
     assert parts.candidate_id == "r7c3f3a2a_g000002_c000014"
     assert parts.attempt_index == 12
+
+
+def test_parse_attempt_id_is_flexible_about_attempt_width() -> None:
+    parts = parse_attempt_id("r7c3f3a2a_g2_c14_a3")
+
+    assert parts is not None
+    assert parts.candidate_id == "r7c3f3a2a_g2_c14"
+    assert parts.attempt_index == 3

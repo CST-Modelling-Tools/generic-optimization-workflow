@@ -143,6 +143,7 @@ Path("output.json").write_text(json.dumps(out), encoding="utf-8")
     first_workdir = Path(first["workdir"])
     input_payload = json.loads((first_workdir / "input.json").read_text(encoding="utf-8"))
     output_payload = json.loads((first_workdir / "output.json").read_text(encoding="utf-8"))
+    result_payload = json.loads((first_workdir / "result.json").read_text(encoding="utf-8"))
     assert input_payload["run_id"] == run_id
     assert input_payload["candidate_id"] == first["candidate_id"]
     assert input_payload["candidate_local_id"] == first["candidate_local_id"]
@@ -150,3 +151,7 @@ Path("output.json").write_text(json.dumps(out), encoding="utf-8")
     assert output_payload["status"] == "ok"
     assert "metrics" in output_payload
     assert "objective" in output_payload
+    assert result_payload["candidate_id"] == first["candidate_id"]
+    assert result_payload["candidate_local_id"] == first["candidate_local_id"]
+    assert result_payload["attempt_id"] == first["attempt_id"]
+    assert result_payload["candidate_index"] == first["candidate_index"]

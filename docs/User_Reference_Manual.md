@@ -62,6 +62,8 @@ Semantics:
 
 - `generation_id` is the zero-based generation/batch number
 - the `c000014` portion records global candidate index `14` within the run, not candidate `14` within generation `2`
+- formatting is fixed-width and zero-padded when GOW generates identifiers
+- parsing is flexible and accepts non-padded forms for backward compatibility
 
 ### Input (`input.json`)
 
@@ -102,6 +104,9 @@ Semantics:
 ```
 
 `output.json` is written by the evaluator.
+
+GOW also writes `result.json` in the candidate work directory in both local and
+FireWorks backends so each candidate has a comparable provenance record.
 
 ### Required Fields
 

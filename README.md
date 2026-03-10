@@ -64,6 +64,9 @@ The evaluator writes output.json and any additional artifacts.
 
 The framework captures stdout/stderr for debugging.
 
+Both local mode and FireWorks mode now also write `result.json` in the candidate
+work directory so each candidate has a comparable per-candidate provenance artifact.
+
 GOW currently keeps one work directory per logical candidate. If a caller re-executes the
 same candidate with a higher attempt index, the provenance identifiers distinguish attempts,
 but the directory layout is intentionally unchanged.
@@ -95,6 +98,12 @@ Identifier semantics:
 - `generation_id` is the zero-based generation/batch number.
 - the `c......` field in `candidate_local_id` and `candidate_id` uses the run-global `candidate_index`
 - `r7c3f3a2a_g000002_c000014` therefore means generation `2`, global candidate index `14`
+
+Parsing behavior:
+
+- formatting is fixed-width and zero-padded
+- parsing is intentionally flexible and accepts non-padded forms such as `g2_c14`
+- GOW always emits the fixed-width canonical form when it generates new identifiers
 
 ### 4) Input JSON (input.json)
 
