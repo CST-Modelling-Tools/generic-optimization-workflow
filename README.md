@@ -1,6 +1,6 @@
 # generic-optimization-workflow
 
-Generic optimization framework for scientific workflows using FireWorks.
+Generic optimization framework for scientific workflows, with optional FireWorks support.
 
 This repository focuses on **optimization orchestration** (candidate generation, scheduling, provenance, result collection),
 while **scientific evaluation workflows** live in independent projects and are executed as external programs.
@@ -52,17 +52,19 @@ Each evaluation runs in its own working directory (created by the optimization f
 <outdir>/runs/<run_id>/<candidate_id>/
   input.json
   output.json
+  result.json
   stdout.txt
   stderr.txt
   logs/
   artifacts/
 ```
 
-GOW writes input.json.
+GOW writes `input.json` and `result.json`.
 
-The evaluator writes output.json and any additional artifacts.
+The evaluator writes `output.json` and may optionally produce additional files
+or directories such as `logs/` and `artifacts/`.
 
-The framework captures stdout/stderr for debugging.
+GOW captures `stdout.txt` and `stderr.txt` for debugging.
 
 Both local mode and FireWorks mode now also write `result.json` in the candidate
 work directory so each candidate has a comparable per-candidate provenance artifact.
@@ -231,6 +233,7 @@ Current behavior:
 - manual re-execution can use a higher attempt index explicitly
 - `gow evaluate` auto-generates a canonical candidate id when `--generation-id` and `--candidate-index` are provided
 - if those metadata are omitted, `gow evaluate` falls back to the explicit non-canonical id `manual`
+- that `manual` id may reuse the same work directory unless `run_id`, `candidate_id`, or `attempt_index` changes
 - JSONL append logic is keyed by `attempt_id` when available, so repeated executions can be preserved as separate attempts
 
 ### 9) Evaluator-internal orchestration is allowed
@@ -248,6 +251,11 @@ compute metrics and write output.json
 This internal structure is completely up to the evaluator. Only the input/output contract above must be respected.
 
 ## Licensing note
+
+## FireWorks Support
+
+FireWorks integration is optional. FireWorks commands and modules require the
+optional FireWorks extra/dependency to be installed.
 
 This repository provides the optimization orchestration framework. Scientific evaluators can live in separate repositories
 and may be licensed independently, as long as they comply with the evaluator contract.

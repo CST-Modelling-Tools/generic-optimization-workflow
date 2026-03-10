@@ -17,7 +17,7 @@ A problem configuration:
 -   Defines objective direction
 -   Stores optional contextual metadata
 
-This manual uses a **toy polynomial regression example** to illustrate
+This manual uses a **toy example** to illustrate
 the configuration format.
 
 ------------------------------------------------------------------------
@@ -41,6 +41,24 @@ to minimize the mean squared error on a synthetic dataset.
 ## 3. Evaluator Contract
 
 Every external evaluator must follow this contract.
+
+Candidate work directory contents typically include:
+
+``` text
+<outdir>/runs/<run_id>/<candidate_id>/
+  input.json
+  output.json
+  result.json
+  stdout.txt
+  stderr.txt
+  logs/
+  artifacts/
+```
+
+- GOW writes `input.json` and `result.json`
+- evaluator writes `output.json`
+- evaluator may optionally produce `logs/`, `artifacts/`, or similar extra files
+- GOW captures `stdout.txt` and `stderr.txt`
 
 ### Provenance identifiers
 
@@ -105,9 +123,6 @@ Semantics:
 
 `output.json` is written by the evaluator.
 
-GOW also writes `result.json` in the candidate work directory in both local and
-FireWorks backends so each candidate has a comparable provenance record.
-
 ### Required Fields
 
   Field       Required   Description
@@ -147,7 +162,13 @@ Current behavior:
 - manual re-execution can use a higher attempt index
 - `gow evaluate` can auto-generate a canonical candidate id when `--generation-id` and `--candidate-index` are provided
 - if they are omitted, `gow evaluate` falls back to the explicit non-canonical id `manual`
+- that `manual` id may reuse the same work directory unless `run_id`, `candidate_id`, or `attempt_index` changes
 - provenance records can preserve multiple attempts for the same `candidate_id`
+
+### FireWorks support
+
+FireWorks integration is optional. FireWorks commands and modules require the
+optional FireWorks extra/dependency to be installed.
 
 ------------------------------------------------------------------------
 
