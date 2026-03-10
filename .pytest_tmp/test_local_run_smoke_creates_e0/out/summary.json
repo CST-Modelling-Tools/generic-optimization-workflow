@@ -1,0 +1,22 @@
+{
+  "best": {
+    "attempt_id": "rcd6f1677_g000001_c000002_a000",
+    "candidate_id": "rcd6f1677_g000001_c000002",
+    "candidate_local_id": "g000001_c000002",
+    "generation_id": 1,
+    "objective": 0.03441636162791294,
+    "params": {
+      "x": -0.18551647265920335
+    }
+  },
+  "max_evaluations": 5,
+  "objective": {
+    "direction": "minimize"
+  },
+  "outdir": "D:\\OpenSource\\generic-optimization-workflow\\.pytest_tmp\\test_local_run_smoke_creates_e0\\out",
+  "problem_id": "toy-sphere",
+  "results_file": "D:\\OpenSource\\generic-optimization-workflow\\.pytest_tmp\\test_local_run_smoke_creates_e0\\out\\results.jsonl",
+  "run_id": "test-run-0001",
+  "run_results_file": "D:\\OpenSource\\generic-optimization-workflow\\.pytest_tmp\\test_local_run_smoke_creates_e0\\out\\runs\\test-run-0001\\results.jsonl",
+  "run_root": "D:\\OpenSource\\generic-optimization-workflow\\.pytest_tmp\\test_local_run_smoke_creates_e0\\out\\runs\\test-run-0001"
+}

@@ -1,0 +1,26 @@
+id: toy-manual-fallback
+objective:
+  direction: minimize
+parameters:
+  x:
+    type: real
+    value: 0.0
+    bounds:
+    - -1.0
+    - 1.0
+  y:
+    type: real
+    value: 0.0
+    bounds:
+    - -1.0
+    - 1.0
+evaluator:
+  command:
+  - '{python}'
+  - D:\OpenSource\generic-optimization-workflow\tests\toy_eval.py
+  timeout_s: 30
+optimizer:
+  name: random_search
+  seed: 123
+  max_evaluations: 1
+  batch_size: 1

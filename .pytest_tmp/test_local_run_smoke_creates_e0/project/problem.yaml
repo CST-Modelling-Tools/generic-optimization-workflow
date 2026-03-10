@@ -1,0 +1,20 @@
+id: toy-sphere
+objective:
+  direction: minimize
+parameters:
+  x:
+    type: real
+    value: 0.25
+    bounds:
+    - -1.0
+    - 1.0
+evaluator:
+  command:
+  - '{python}'
+  - D:\OpenSource\generic-optimization-workflow\.pytest_tmp\test_local_run_smoke_creates_e0\project\toy_eval.py
+  timeout_s: 30
+optimizer:
+  name: random_search
+  seed: 123
+  max_evaluations: 5
+  batch_size: 2

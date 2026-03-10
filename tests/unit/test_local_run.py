@@ -108,6 +108,7 @@ Path("output.json").write_text(json.dumps(out), encoding="utf-8")
     # Align with your actual JSONL structure:
     for r in rows:
         assert "candidate_id" in r
+        assert "candidate_index" in r
         assert "candidate_local_id" in r
         assert "attempt_id" in r
         assert "fitness" in r
@@ -116,6 +117,11 @@ Path("output.json").write_text(json.dumps(out), encoding="utf-8")
         assert r["candidate_id"].startswith(f"r{derive_run_token(run_id)}_")
         assert r["candidate_local_id"].startswith("g")
         assert r["attempt_id"] == f"{r['candidate_id']}_a000"
+
+    assert [r["candidate_index"] for r in rows] == list(range(len(rows)))
+    assert rows[0]["candidate_local_id"] == "g000000_c000000"
+    assert rows[1]["candidate_local_id"] == "g000000_c000001"
+    assert rows[2]["candidate_local_id"] == "g000001_c000002"
 
     first = rows[0]
     first_workdir = Path(first["workdir"])

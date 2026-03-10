@@ -48,6 +48,7 @@ Every external evaluator must follow this contract.
 - `candidate_id`: identifies the logical candidate
 - `attempt_id`: identifies a specific execution attempt of that candidate
 - `candidate_local_id`: preserves the legacy local label
+- `candidate_index`: zero-based global candidate/evaluation sequence number within the run
 
 Canonical example values:
 
@@ -56,6 +57,11 @@ candidate_id       = r7c3f3a2a_g000002_c000014
 candidate_local_id = g000002_c000014
 attempt_id         = r7c3f3a2a_g000002_c000014_a000
 ```
+
+Semantics:
+
+- `generation_id` is the zero-based generation/batch number
+- the `c000014` portion records global candidate index `14` within the run, not candidate `14` within generation `2`
 
 ### Input (`input.json`)
 
@@ -120,6 +126,8 @@ Current behavior:
 
 - generated optimization runs produce `attempt_id` values starting at `a000`
 - manual re-execution can use a higher attempt index
+- `gow evaluate` can auto-generate a canonical candidate id when `--generation-id` and `--candidate-index` are provided
+- if they are omitted, `gow evaluate` falls back to the explicit non-canonical id `manual`
 - provenance records can preserve multiple attempts for the same `candidate_id`
 
 ------------------------------------------------------------------------

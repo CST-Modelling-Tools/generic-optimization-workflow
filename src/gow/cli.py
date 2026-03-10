@@ -85,6 +85,25 @@ def _parse_kv_params(items: list[str]) -> dict[str, Any]:
     return out
 
 
+def _resolve_manual_candidate_id(
+    *,
+    candidate_id: str | None,
+    run_id: str,
+    generation_id: int | None,
+    candidate_index: int | None,
+) -> str:
+    """Resolve the candidate id for manual single-candidate evaluation."""
+    if candidate_id is not None:
+        return candidate_id
+    if generation_id is not None and candidate_index is not None:
+        return format_candidate_id(
+            generation_id=generation_id,
+            candidate_index=candidate_index,
+            run_id=run_id,
+        )
+    return "manual"
+
+
 def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -275,7 +294,25 @@ def evaluate_cmd(
         ),
     ),
     run_id: str = typer.Option("manual", "--run-id", help="Run id used to build the workdir path."),
-    candidate_id: str = typer.Option("manual", "--candidate-id", help="Candidate id used to build the workdir path."),
+    candidate_id: str | None = typer.Option(
+        None,
+        "--candidate-id",
+        help=(
+            "Candidate id used to build the workdir path. If omitted and both "
+            "--generation-id and --candidate-index are provided, GOW generates a "
+            "canonical run-aware candidate id; otherwise it falls back to 'manual'."
+        ),
+    ),
+    generation_id: int | None = typer.Option(
+        None,
+        "--generation-id",
+        help="Optional zero-based generation number used for metadata and canonical candidate-id generation.",
+    ),
+    candidate_index: int | None = typer.Option(
+        None,
+        "--candidate-index",
+        help="Optional zero-based global candidate sequence number within the run.",
+    ),
     attempt_index: int = typer.Option(
         0,
         "--attempt-index",
@@ -302,17 +339,24 @@ def evaluate_cmd(
 
     overrides.update(_parse_kv_params(param))
 
-    workdir = candidate_workdir(results_dir, run_id, candidate_id)
-    candidate_parts = parse_candidate_id(candidate_id)
+    candidate_id_value = _resolve_manual_candidate_id(
+        candidate_id=candidate_id,
+        run_id=run_id,
+        generation_id=generation_id,
+        candidate_index=candidate_index,
+    )
+
+    workdir = candidate_workdir(results_dir, run_id, candidate_id_value)
+    candidate_parts = parse_candidate_id(candidate_id_value)
     candidate_local_id = candidate_parts.candidate_local_id if candidate_parts is not None else None
-    attempt_id = format_attempt_id(candidate_id, attempt_index)
+    attempt_id = format_attempt_id(candidate_id_value, attempt_index)
 
     from gow.evaluation import evaluate_candidate  # local import
 
     res = evaluate_candidate(
         problem,
         run_id=run_id,
-        candidate_id=candidate_id,
+        candidate_id=candidate_id_value,
         candidate_local_id=candidate_local_id,
         attempt_id=attempt_id,
         candidate_params=overrides,
@@ -396,9 +440,25 @@ def fw_evaluate_cmd(
         ),
     ),
     run_id: str = typer.Option("fw-manual", "--run-id", help="Run id used to build the workdir path."),
-    candidate_id: str = typer.Option("c000000", "--candidate-id", help="Candidate id used to build the workdir path."),
-    generation_id: int | None = typer.Option(None, "--generation-id", help="Optional generation id for metadata (e.g. 0, 1, 2, ...)."),
-    candidate_index: int | None = typer.Option(None, "--candidate-index", help="Optional candidate index (global) for metadata."),
+    candidate_id: str | None = typer.Option(
+        None,
+        "--candidate-id",
+        help=(
+            "Candidate id used to build the workdir path. If omitted and both "
+            "--generation-id and --candidate-index are provided, GOW generates a "
+            "canonical run-aware candidate id; otherwise it falls back to 'manual'."
+        ),
+    ),
+    generation_id: int | None = typer.Option(
+        None,
+        "--generation-id",
+        help="Optional zero-based generation number used for metadata and canonical candidate-id generation.",
+    ),
+    candidate_index: int | None = typer.Option(
+        None,
+        "--candidate-index",
+        help="Optional zero-based global candidate sequence number within the run.",
+    ),
     attempt_index: int = typer.Option(
         0,
         "--attempt-index",
@@ -441,12 +501,18 @@ def fw_evaluate_cmd(
     lp = load_launchpad(launchpad)
 
     launchers_dir = launch_dir.expanduser().resolve() if launch_dir else run_launchers_dir(results_dir, run_id)
+    candidate_id_value = _resolve_manual_candidate_id(
+        candidate_id=candidate_id,
+        run_id=run_id,
+        generation_id=generation_id,
+        candidate_index=candidate_index,
+    )
 
     spec = SingleEvalSpec(
         problem_config=config_abs,
         outdir=results_dir,
         run_id=run_id,
-        candidate_id=candidate_id,
+        candidate_id=candidate_id_value,
         candidate_params=overrides,
         generation_id=generation_id,
         candidate_index=candidate_index,

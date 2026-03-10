@@ -18,6 +18,15 @@ This design keeps the scientific code and its dependencies isolated and versione
 
 ---
 
+## Toy Example
+
+The repository ships with a small toy example in `examples/toy/optimization_specs.yaml`
+that evaluates a simple sphere objective using `x` and `y`. The user-facing examples
+below use that toy framing so the provenance and evaluator contract stay consistent
+with the code you can run locally.
+
+---
+
 ## Scientific Evaluator Contract (External Executable)
 
 Scientific workflows are implemented as **external executables** (often C++ for performance) and can be maintained in
@@ -65,6 +74,7 @@ but the directory layout is intentionally unchanged.
 - `candidate_id` identifies the logical candidate proposed by the optimizer.
 - `attempt_id` identifies one concrete execution attempt of that candidate.
 - `candidate_local_id` preserves the legacy local label `g<generation>_c<candidate>`.
+- `candidate_index` is the zero-based global candidate/evaluation sequence number within a run.
 
 Canonical formats:
 
@@ -79,6 +89,12 @@ Why this matters:
 - `candidate_id` stays human-readable while remaining globally unique across runs.
 - `attempt_id` preserves provenance if the same candidate is retried or manually re-executed.
 - `candidate_local_id` lets existing tooling keep using the older generation/candidate label.
+
+Identifier semantics:
+
+- `generation_id` is the zero-based generation/batch number.
+- the `c......` field in `candidate_local_id` and `candidate_id` uses the run-global `candidate_index`
+- `r7c3f3a2a_g000002_c000014` therefore means generation `2`, global candidate index `14`
 
 ### 4) Input JSON (input.json)
 
@@ -105,14 +121,13 @@ Example:
   "candidate_local_id": "g000002_c000014",
   "attempt_id": "r7c3f3a2a_g000002_c000014_a000",
   "params": {
-    "k1": 0.123,
-    "k2": -1.2,
-    "n_terms": 14
+    "x": 0.5,
+    "y": -0.25,
+    "n": 5,
+    "mode": "a"
   },
   "context": {
-    "problem": "sunpos",
-    "reference_dataset": "mica_2026a",
-    "seed": 42
+    "note": "toy example using Differential Evolution"
   }
 }
 ```
@@ -148,18 +163,10 @@ Example:
 {
   "status": "ok",
   "metrics": {
-    "avg_error_deg": 0.42,
-    "max_error_deg": 1.90,
-    "min_error_deg": 0.02
+    "sphere": 0.3125
   },
-  "objective": 0.42,
-  "constraints": {
-    "runtime_s": 58.1
-  },
-  "artifacts": {
-    "log": "logs/run.log",
-    "details_csv": "artifacts/errors.csv"
-  }
+  "objective": 0.3125,
+  "artifacts": {}
 }
 ```
 
@@ -200,6 +207,8 @@ Current behavior:
 
 - automatic optimization runs create one attempt per candidate, so generated attempts are `a000`
 - manual re-execution can use a higher attempt index explicitly
+- `gow evaluate` auto-generates a canonical candidate id when `--generation-id` and `--candidate-index` are provided
+- if those metadata are omitted, `gow evaluate` falls back to the explicit non-canonical id `manual`
 - JSONL append logic is keyed by `attempt_id` when available, so repeated executions can be preserved as separate attempts
 
 ### 8) Evaluator-internal orchestration is allowed

@@ -2,6 +2,8 @@ id: toy-sphere-de
 
 # Provenance note:
 # - generated candidate_id values are run-aware, e.g. r7c3f3a2a_g000002_c000014
+# - generation_id is the batch/generation counter; candidate_index is the
+#   zero-based global candidate sequence number within the run
 # - generated attempt_id values identify concrete executions, e.g.
 #   r7c3f3a2a_g000002_c000014_a000
 # - automatic runs currently emit the first attempt (a000); manual re-execution
