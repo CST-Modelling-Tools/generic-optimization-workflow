@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from gow.candidate_ids import format_candidate_id
+from gow.candidate_ids import format_attempt_id, format_candidate_id, format_candidate_local_id
 from gow.config import ProblemConfig
 from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
@@ -109,10 +109,17 @@ def run_local_optimization(
         fitness_dicts = []
         for i, cand in enumerate(candidates):
             candidate_index = n_done + i
-            candidate_id = format_candidate_id(
+            candidate_local_id = format_candidate_local_id(
                 generation_id=generation_id,
                 candidate_index=candidate_index,
             )
+            candidate_id = format_candidate_id(
+                generation_id=generation_id,
+                candidate_index=candidate_index,
+                run_id=run_id_val,
+            )
+            attempt_index = 0
+            attempt_id = format_attempt_id(candidate_id, attempt_index)
 
             workdir = run_root / candidate_id
             workdir.mkdir(parents=True, exist_ok=True)
@@ -121,6 +128,8 @@ def run_local_optimization(
                 problem,
                 run_id=run_id_val,
                 candidate_id=candidate_id,
+                candidate_local_id=candidate_local_id,
+                attempt_id=attempt_id,
                 candidate_params=cand,
                 workdir=workdir,
             )
@@ -130,7 +139,11 @@ def run_local_optimization(
                 "problem_id": problem.id,
                 "run_id": run_id_val,
                 "generation_id": generation_id,
+                "candidate_index": candidate_index,
                 "candidate_id": candidate_id,
+                "candidate_local_id": candidate_local_id,
+                "attempt_id": attempt_id,
+                "attempt_index": attempt_index,
                 "params": {**problem.runtime_params(), **cand},
                 "fitness": fit,
                 "returncode": res.returncode,
@@ -153,6 +166,8 @@ def run_local_optimization(
                     best = {
                         "objective": obj,
                         "candidate_id": candidate_id,
+                        "candidate_local_id": candidate_local_id,
+                        "attempt_id": attempt_id,
                         "generation_id": generation_id,
                         "params": record["params"],
                     }

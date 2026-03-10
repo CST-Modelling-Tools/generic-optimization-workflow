@@ -33,6 +33,8 @@ def run_external_evaluator(
     workdir: str | Path,
     run_id: str,
     candidate_id: str,
+    candidate_local_id: str | None = None,
+    attempt_id: str | None = None,
     params: Dict,
     context: Optional[Dict] = None,
     timeout_s: int = 600,
@@ -63,6 +65,8 @@ def run_external_evaluator(
         input_path,
         run_id=run_id,
         candidate_id=candidate_id,
+        candidate_local_id=candidate_local_id,
+        attempt_id=attempt_id,
         params=params,
         context=context or {},
     )

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from gow.candidate_ids import format_attempt_id, parse_candidate_id
 from gow.config import load_problem_config
 from gow.evaluation import evaluate_candidate
 from gow.layout import candidate_workdir, run_root as run_root_dir
@@ -48,29 +48,11 @@ from fireworks import FWAction, FiretaskBase, explicit_serialize  # type: ignore
 from filelock import FileLock  # type: ignore  # noqa: E402
 
 
-# ---------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------
-
-_CAND_ID_RE = re.compile(r"^g(?P<g>\d+)_c(?P<c>\d+)$")
-
-
 def _parse_candidate_id(candidate_id: str) -> Tuple[Optional[int], Optional[int]]:
-    """
-    Parse canonical candidate ids like:
-      g000009_c000495
-
-    Returns: (generation_id, candidate_index) or (None, None) if not parseable.
-    """
-    m = _CAND_ID_RE.match(str(candidate_id))
-    if not m:
+    parts = parse_candidate_id(candidate_id)
+    if parts is None:
         return None, None
-    try:
-        g = int(m.group("g"))
-        c = int(m.group("c"))
-    except Exception:
-        return None, None
-    return g, c
+    return parts.generation_id, parts.candidate_index
 
 
 def _fill_generation_metadata(
@@ -98,16 +80,18 @@ def _fill_generation_metadata(
     return g, c
 
 
-def _unique_key(record: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+def _unique_key(record: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Idempotency key for results.jsonl lines.
-    Prefer (run_id, candidate_id). If missing, returns (None, candidate_id).
+    Prefer (run_id, attempt_id). Fall back to candidate_id for legacy records.
     """
     rid = record.get("run_id")
+    aid = record.get("attempt_id")
     cid = record.get("candidate_id")
     rid = str(rid) if rid is not None else None
+    aid = str(aid) if aid is not None else None
     cid = str(cid) if cid is not None else None
-    return rid, cid
+    return rid, aid, cid
 
 
 # ---------------------------------------------------------------------
@@ -123,7 +107,7 @@ class EvaluateCandidateTask(FiretaskBase):
     `outdir` is the flattened problem root (same as CLI --outdir).
     """
     required_params = ["problem_config", "run_id", "candidate_id", "candidate_params", "outdir"]
-    optional_params = ["context_override", "generation_id", "candidate_index"]
+    optional_params = ["context_override", "generation_id", "candidate_index", "attempt_index"]
 
     def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
         problem_config = Path(self["problem_config"]).expanduser()
@@ -136,11 +120,16 @@ class EvaluateCandidateTask(FiretaskBase):
         # Fill metadata even if workflow didn't pass it.
         generation_id_raw = self.get("generation_id")
         candidate_index_raw = self.get("candidate_index")
+        attempt_index_raw = self.get("attempt_index")
         generation_id, candidate_index = _fill_generation_metadata(
             candidate_id=candidate_id,
             generation_id=generation_id_raw if isinstance(generation_id_raw, int) else generation_id_raw,
             candidate_index=candidate_index_raw if isinstance(candidate_index_raw, int) else candidate_index_raw,
         )
+        attempt_index = attempt_index_raw if isinstance(attempt_index_raw, int) else 0
+        candidate_parts = parse_candidate_id(candidate_id)
+        candidate_local_id = candidate_parts.candidate_local_id if candidate_parts is not None else None
+        attempt_id = format_attempt_id(candidate_id, attempt_index)
 
         problem = load_problem_config(problem_config)
 
@@ -151,6 +140,8 @@ class EvaluateCandidateTask(FiretaskBase):
             problem,
             run_id=run_id,
             candidate_id=candidate_id,
+            candidate_local_id=candidate_local_id,
+            attempt_id=attempt_id,
             candidate_params=candidate_params,
             workdir=workdir,
             context_override=context_override,
@@ -160,9 +151,12 @@ class EvaluateCandidateTask(FiretaskBase):
             "problem_id": problem.id,
             "run_id": run_id,
             "candidate_id": candidate_id,
+            "candidate_local_id": candidate_local_id,
+            "attempt_id": attempt_id,
             # include generation metadata (doesn't change folder layout)
             "generation_id": generation_id,
             "candidate_index": candidate_index,
+            "attempt_index": attempt_index,
             "params": _to_jsonable({**problem.runtime_params(), **candidate_params}),
             "fitness": _to_jsonable(res.fitness.model_dump()),
             "returncode": res.returncode,
@@ -190,7 +184,8 @@ class AppendResultJsonlTask(FiretaskBase):
       2) <outdir>/runs/<run_id>/results.jsonl  (optional)
 
     Uses file locks to prevent corruption under parallel execution.
-    Idempotent by (run_id, candidate_id).
+    Idempotent by (run_id, attempt_id), falling back to (run_id, candidate_id)
+    for legacy records without attempt metadata.
 
     HARD SAFETY:
       - will refuse to append if result.json's candidate_id != task candidate_id
@@ -206,9 +201,17 @@ class AppendResultJsonlTask(FiretaskBase):
         "append_run_level",
         "generation_id",
         "candidate_index",
+        "attempt_index",
     ]
 
-    def _already_appended(self, results_path: Path, *, run_id: str, candidate_id: str) -> bool:
+    def _already_appended(
+        self,
+        results_path: Path,
+        *,
+        run_id: str,
+        candidate_id: str,
+        attempt_id: str | None,
+    ) -> bool:
         try:
             with results_path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -219,8 +222,14 @@ class AppendResultJsonlTask(FiretaskBase):
                         obj = json.loads(line)
                     except Exception:
                         continue
-                    rid, cid = _unique_key(obj)
-                    if rid == run_id and cid == candidate_id:
+                    rid, aid, cid = _unique_key(obj)
+                    if rid != run_id:
+                        continue
+                    if attempt_id is not None:
+                        if aid == attempt_id:
+                            return True
+                        continue
+                    if cid == candidate_id:
                         return True
         except FileNotFoundError:
             return False
@@ -234,11 +243,17 @@ class AppendResultJsonlTask(FiretaskBase):
         *,
         run_id: str,
         candidate_id: str,
+        attempt_id: str | None,
         skip_if_exists: bool,
     ) -> bool:
         lock = FileLock(str(lock_path))
         with lock:
-            if skip_if_exists and self._already_appended(results_path, run_id=run_id, candidate_id=candidate_id):
+            if skip_if_exists and self._already_appended(
+                results_path,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                attempt_id=attempt_id,
+            ):
                 return False
             append_jsonl_line(results_path, record)
         return True
@@ -248,6 +263,7 @@ class AppendResultJsonlTask(FiretaskBase):
         problem_id: str = self["problem_id"]
         run_id: str = self["run_id"]
         candidate_id: str = self["candidate_id"]
+        attempt_index = self["attempt_index"] if isinstance(self.get("attempt_index"), int) else 0
 
         result_filename = str(self.get("result_filename", "result.json"))
         results_filename = str(self.get("results_filename", "results.jsonl"))
@@ -265,6 +281,12 @@ class AppendResultJsonlTask(FiretaskBase):
             raise FileNotFoundError(f"Expected result file not found: {result_path}")
 
         record = json.loads(result_path.read_text(encoding="utf-8"))
+        attempt_id = str(record.get("attempt_id")) if record.get("attempt_id") is not None else format_attempt_id(candidate_id, attempt_index)
+        record.setdefault("attempt_id", attempt_id)
+        record.setdefault("attempt_index", attempt_index)
+        parts = parse_candidate_id(candidate_id)
+        if record.get("candidate_local_id") is None and parts is not None:
+            record["candidate_local_id"] = parts.candidate_local_id
 
         # --- HARD CONSISTENCY CHECKS (this prevents the mixed naming issue) ---
         rec_pid = record.get("problem_id")
@@ -284,6 +306,12 @@ class AppendResultJsonlTask(FiretaskBase):
         if rec_cid is not None and str(rec_cid) != str(candidate_id):
             raise RuntimeError(
                 f"Record candidate_id={rec_cid!r} does not match task candidate_id={candidate_id!r} "
+                f"(workdir={workdir})"
+            )
+        rec_aid = record.get("attempt_id")
+        if rec_aid is not None and str(rec_aid) != attempt_id:
+            raise RuntimeError(
+                f"Record attempt_id={rec_aid!r} does not match task attempt_id={attempt_id!r} "
                 f"(workdir={workdir})"
             )
 
@@ -314,6 +342,7 @@ class AppendResultJsonlTask(FiretaskBase):
             record,
             run_id=run_id,
             candidate_id=candidate_id,
+            attempt_id=attempt_id,
             skip_if_exists=skip_if_exists,
         )
 
@@ -328,12 +357,14 @@ class AppendResultJsonlTask(FiretaskBase):
                 record,
                 run_id=run_id,
                 candidate_id=candidate_id,
+                attempt_id=attempt_id,
                 skip_if_exists=skip_if_exists,
             )
 
         return FWAction(
             stored_data={
                 "candidate_id": candidate_id,
+                "attempt_id": attempt_id,
                 "problem_id": problem_id,
                 "problem_results": str(problem_results_path),
                 "run_results": str(run_results_path),

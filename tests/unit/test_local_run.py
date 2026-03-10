@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 
+from gow.candidate_ids import derive_run_token
 from gow.config import load_problem_config
 from gow.run import run_local_optimization
 
@@ -46,13 +47,14 @@ import json
 from pathlib import Path
 
 inp = json.loads(Path("input.json").read_text(encoding="utf-8"))
-params = inp.get("parameters", {})
+params = inp.get("params", {})
 x = float(params.get("x", 0.0))
 objective = x * x
 
 out = {
     "status": "ok",
     "metrics": {"objective": objective},
+    "objective": objective,
     "constraints": {},
     "artifacts": {},
     "error": None,
@@ -106,6 +108,23 @@ Path("output.json").write_text(json.dumps(out), encoding="utf-8")
     # Align with your actual JSONL structure:
     for r in rows:
         assert "candidate_id" in r
+        assert "candidate_local_id" in r
+        assert "attempt_id" in r
         assert "fitness" in r
         assert isinstance(r["fitness"], dict)
         assert r["fitness"].get("status") in ("ok", "failed")
+        assert r["candidate_id"].startswith(f"r{derive_run_token(run_id)}_")
+        assert r["candidate_local_id"].startswith("g")
+        assert r["attempt_id"] == f"{r['candidate_id']}_a000"
+
+    first = rows[0]
+    first_workdir = Path(first["workdir"])
+    input_payload = json.loads((first_workdir / "input.json").read_text(encoding="utf-8"))
+    output_payload = json.loads((first_workdir / "output.json").read_text(encoding="utf-8"))
+    assert input_payload["run_id"] == run_id
+    assert input_payload["candidate_id"] == first["candidate_id"]
+    assert input_payload["candidate_local_id"] == first["candidate_local_id"]
+    assert input_payload["attempt_id"] == first["attempt_id"]
+    assert output_payload["status"] == "ok"
+    assert "metrics" in output_payload
+    assert "objective" in output_payload

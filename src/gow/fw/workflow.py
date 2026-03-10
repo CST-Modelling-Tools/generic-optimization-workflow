@@ -38,6 +38,7 @@ class SingleEvalSpec:
     # Optional metadata (useful for analysis and parity with local mode)
     generation_id: Optional[int] = None
     candidate_index: Optional[int] = None
+    attempt_index: int = 0
 
     context_override: Optional[Dict[str, Any]] = None
 
@@ -65,6 +66,7 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
         # propagate metadata for parity with local mode
         "generation_id": spec.generation_id,
         "candidate_index": spec.candidate_index,
+        "attempt_index": spec.attempt_index,
     }
     if spec.context_override:
         eval_task_params["context_override"] = _to_jsonable(spec.context_override)
@@ -77,6 +79,7 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
         # propagate metadata for parity with local mode
         "generation_id": spec.generation_id,
         "candidate_index": spec.candidate_index,
+        "attempt_index": spec.attempt_index,
     }
 
     # Single FireWork containing both tasks in sequence.
@@ -92,6 +95,7 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
             "candidate_id": spec.candidate_id,
             "generation_id": spec.generation_id,
             "candidate_index": spec.candidate_index,
+            "attempt_index": spec.attempt_index,
         },
     )
 

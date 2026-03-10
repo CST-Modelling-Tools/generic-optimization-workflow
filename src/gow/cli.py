@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 import typer
 
-from gow.candidate_ids import format_candidate_id
+from gow.candidate_ids import format_attempt_id, format_candidate_id, parse_candidate_id
 from gow.config import load_problem_config
 from gow.layout import candidate_workdir, run_launchers_dir, run_root
 from gow.run import run_local_optimization
@@ -276,6 +276,12 @@ def evaluate_cmd(
     ),
     run_id: str = typer.Option("manual", "--run-id", help="Run id used to build the workdir path."),
     candidate_id: str = typer.Option("manual", "--candidate-id", help="Candidate id used to build the workdir path."),
+    attempt_index: int = typer.Option(
+        0,
+        "--attempt-index",
+        min=0,
+        help="Attempt index for this execution. Use 0 for the first attempt and increment on manual re-execution.",
+    ),
     param: list[str] = typer.Option([], "--param", "-p", help="Override parameter as NAME=VALUE (repeatable)."),
     params_file: Path | None = typer.Option(None, "--params-file", help="JSON file with parameter overrides."),
 ):
@@ -297,6 +303,9 @@ def evaluate_cmd(
     overrides.update(_parse_kv_params(param))
 
     workdir = candidate_workdir(results_dir, run_id, candidate_id)
+    candidate_parts = parse_candidate_id(candidate_id)
+    candidate_local_id = candidate_parts.candidate_local_id if candidate_parts is not None else None
+    attempt_id = format_attempt_id(candidate_id, attempt_index)
 
     from gow.evaluation import evaluate_candidate  # local import
 
@@ -304,6 +313,8 @@ def evaluate_cmd(
         problem,
         run_id=run_id,
         candidate_id=candidate_id,
+        candidate_local_id=candidate_local_id,
+        attempt_id=attempt_id,
         candidate_params=overrides,
         workdir=workdir,
     )
@@ -388,6 +399,12 @@ def fw_evaluate_cmd(
     candidate_id: str = typer.Option("c000000", "--candidate-id", help="Candidate id used to build the workdir path."),
     generation_id: int | None = typer.Option(None, "--generation-id", help="Optional generation id for metadata (e.g. 0, 1, 2, ...)."),
     candidate_index: int | None = typer.Option(None, "--candidate-index", help="Optional candidate index (global) for metadata."),
+    attempt_index: int = typer.Option(
+        0,
+        "--attempt-index",
+        min=0,
+        help="Attempt index for this execution. Use 0 for the first attempt and increment on manual re-execution.",
+    ),
     param: list[str] = typer.Option([], "--param", "-p", help="Override parameter as NAME=VALUE (repeatable)."),
     params_file: Path | None = typer.Option(None, "--params-file", help="JSON file with parameter overrides."),
     launch: bool = typer.Option(False, "--launch/--no-launch", help="Launch immediately (rapidfire) after submitting."),
@@ -433,6 +450,7 @@ def fw_evaluate_cmd(
         candidate_params=overrides,
         generation_id=generation_id,
         candidate_index=candidate_index,
+        attempt_index=attempt_index,
     )
     wf = build_single_evaluate_workflow(spec)
 
@@ -546,7 +564,11 @@ def fw_run_cmd(
         candidate_ids: list[str] = []
         for i, cand in enumerate(candidates):
             idx = n_done + i  # global index
-            candidate_id = format_candidate_id(generation_id=generation_id, candidate_index=idx)
+            candidate_id = format_candidate_id(
+                generation_id=generation_id,
+                candidate_index=idx,
+                run_id=run_id_val,
+            )
             candidate_ids.append(candidate_id)
 
             spec = SingleEvalSpec(
@@ -557,6 +579,7 @@ def fw_run_cmd(
                 candidate_params=cand,
                 generation_id=generation_id,
                 candidate_index=idx,
+                attempt_index=0,
             )
             wf = build_single_evaluate_workflow(spec)
             lp.add_wf(wf)

@@ -42,12 +42,29 @@ to minimize the mean squared error on a synthetic dataset.
 
 Every external evaluator must follow this contract.
 
+### Provenance identifiers
+
+- `run_id`: identifies the optimization run
+- `candidate_id`: identifies the logical candidate
+- `attempt_id`: identifies a specific execution attempt of that candidate
+- `candidate_local_id`: preserves the legacy local label
+
+Canonical example values:
+
+``` text
+candidate_id       = r7c3f3a2a_g000002_c000014
+candidate_local_id = g000002_c000014
+attempt_id         = r7c3f3a2a_g000002_c000014_a000
+```
+
 ### Input (`input.json`)
 
 ``` json
 {
   "run_id": "7c3f3a2a-7c40-4c7b-b9c6-5b02f3b6c6d0",
-  "candidate_id": "c000123",
+  "candidate_id": "r7c3f3a2a_g000002_c000014",
+  "candidate_local_id": "g000002_c000014",
+  "attempt_id": "r7c3f3a2a_g000002_c000014_a000",
   "params": {
     "k1": 0.123,
     "k2": -1.2,
@@ -61,25 +78,49 @@ Every external evaluator must follow this contract.
 }
 ```
 
+`input.json` is written by GOW before the evaluator starts.
+
 ### Output (`output.json`)
 
 ``` json
 {
+  "status": "ok",
   "objective": 0.04231,
   "metrics": {
-    "mse": 0.04231
+    "mse": 0.04231,
+    "max_abs_error": 0.18
   },
+  "constraints": {},
   "artifacts": {}
 }
 ```
 
+`output.json` is written by the evaluator.
+
 ### Required Fields
 
   Field       Required   Description
-  ----------- ---------- -----------------------------
-  objective   Yes        Scalar objective value
-  metrics     No         Optional diagnostic metrics
+  ----------- ---------- -----------------------------------------------------
+  status      Yes        `ok` or `failed`
+  metrics     Yes        Named evaluator outputs
+  objective   No         Scalar value used by the optimizer for ranking
   artifacts   No         Optional output artifacts
+
+`metrics` and `objective` are related but different:
+
+- `metrics` is the full evaluator result payload
+- `objective` is the one scalar that optimization compares
+- the objective may duplicate one metric, but it is still recorded separately
+
+### Current attempt semantics
+
+GOW does not currently implement automatic retries in the local or FireWorks runners.
+
+Current behavior:
+
+- generated optimization runs produce `attempt_id` values starting at `a000`
+- manual re-execution can use a higher attempt index
+- provenance records can preserve multiple attempts for the same `candidate_id`
 
 ------------------------------------------------------------------------
 

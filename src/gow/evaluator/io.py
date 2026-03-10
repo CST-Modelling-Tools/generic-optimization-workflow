@@ -12,6 +12,8 @@ def write_input_json(
     *,
     run_id: str,
     candidate_id: str,
+    candidate_local_id: str | None = None,
+    attempt_id: str | None = None,
     params: Dict[str, Any],
     context: Dict[str, Any] | None = None,
 ) -> None:
@@ -22,6 +24,10 @@ def write_input_json(
         "params": params,
         "context": context or {},
     }
+    if candidate_local_id is not None:
+        payload["candidate_local_id"] = candidate_local_id
+    if attempt_id is not None:
+        payload["attempt_id"] = attempt_id
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 

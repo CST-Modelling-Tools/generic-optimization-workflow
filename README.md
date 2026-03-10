@@ -40,7 +40,7 @@ Recommended standard:
 Each evaluation runs in its own working directory (created by the optimization framework), for example:
 
 ```bash
-runs/<problem_id>/<run_id>/<candidate_id>/
+<outdir>/runs/<run_id>/<candidate_id>/
   input.json
   output.json
   stdout.txt
@@ -49,19 +49,48 @@ runs/<problem_id>/<run_id>/<candidate_id>/
   artifacts/
 ```
 
-The optimizer writes input.json.
+GOW writes input.json.
 
 The evaluator writes output.json and any additional artifacts.
 
 The framework captures stdout/stderr for debugging.
 
-### 3) Input JSON (input.json)
+GOW currently keeps one work directory per logical candidate. If a caller re-executes the
+same candidate with a higher attempt index, the provenance identifiers distinguish attempts,
+but the directory layout is intentionally unchanged.
+
+### 3) Provenance identifiers
+
+- `run_id` identifies the optimization run.
+- `candidate_id` identifies the logical candidate proposed by the optimizer.
+- `attempt_id` identifies one concrete execution attempt of that candidate.
+- `candidate_local_id` preserves the legacy local label `g<generation>_c<candidate>`.
+
+Canonical formats:
+
+```text
+candidate_id      = r7c3f3a2a_g000002_c000014
+candidate_local_id = g000002_c000014
+attempt_id        = r7c3f3a2a_g000002_c000014_a000
+```
+
+Why this matters:
+
+- `candidate_id` stays human-readable while remaining globally unique across runs.
+- `attempt_id` preserves provenance if the same candidate is retried or manually re-executed.
+- `candidate_local_id` lets existing tooling keep using the older generation/candidate label.
+
+### 4) Input JSON (input.json)
 
 At minimum:
 
 run_id (string)
 
 candidate_id (string)
+
+candidate_local_id (string, optional legacy/local label)
+
+attempt_id (string)
 
 params (object): the runtime parameter values for this candidate
 
@@ -72,7 +101,9 @@ Example:
 ```json
 {
   "run_id": "7c3f3a2a-7c40-4c7b-b9c6-5b02f3b6c6d0",
-  "candidate_id": "c000123",
+  "candidate_id": "r7c3f3a2a_g000002_c000014",
+  "candidate_local_id": "g000002_c000014",
+  "attempt_id": "r7c3f3a2a_g000002_c000014_a000",
   "params": {
     "k1": 0.123,
     "k2": -1.2,
@@ -90,9 +121,12 @@ Notes:
 
 params should contain already-cast values (floats/ints/strings) ready for computation.
 
+`candidate_id` is the primary provenance identifier for the logical candidate. `attempt_id`
+identifies the specific execution attempt. The first attempt is always `a000`.
+
 If you maintain a richer parameter schema elsewhere (types, bounds, etc.), this should be resolved before writing input.json
 
-### 4) Output JSON (output.json)
+### 5) Output JSON (output.json)
 
 Evaluators MUST produce an output JSON file with:
 
@@ -129,7 +163,13 @@ Example:
 }
 ```
 
-### 5) Failure behaviour
+Notes:
+
+- `metrics` is the general container for evaluator outputs.
+- `objective` is the single scalar value the optimizer compares when selecting the best candidate.
+- `objective` may duplicate one metric, but it has a distinct role in optimization and provenance.
+
+### 6) Failure behaviour
 
 Evaluators SHOULD attempt to write output.json even when they fail. For failures:
 
@@ -152,7 +192,17 @@ Example:
 
 The optimization framework can then decide how to handle failures (retry, penalize, skip, etc.).
 
-### 6) Evaluator-internal orchestration is allowed
+### 7) Current attempt semantics
+
+GOW does not currently implement an automatic retry policy in the local or FireWorks runners.
+
+Current behavior:
+
+- automatic optimization runs create one attempt per candidate, so generated attempts are `a000`
+- manual re-execution can use a higher attempt index explicitly
+- JSONL append logic is keyed by `attempt_id` when available, so repeated executions can be preserved as separate attempts
+
+### 8) Evaluator-internal orchestration is allowed
 
 An evaluator executable may internally run multiple programs/steps, for example:
 
