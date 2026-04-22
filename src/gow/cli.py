@@ -202,6 +202,43 @@ def _is_better(a: float, b: float, direction: str) -> bool:
     raise ValueError("direction must be 'minimize' or 'maximize'")
 
 
+
+
+def _launch_fireworks(
+    *,
+    lp: Any,
+    mode: str,
+    nlaunches: int,
+    sleep: int,
+    qadapter_path: Path | None = None,
+    njobs_queue: int = 0,
+    reserve: bool = False,
+) -> None:
+    mode_norm = str(mode).strip().lower()
+    if mode_norm not in {"local", "queue"}:
+        raise typer.BadParameter("--launcher must be 'local' or 'queue'")
+
+    if mode_norm == "local":
+        from fireworks.core.rocket_launcher import rapidfire as local_rapidfire
+
+        local_rapidfire(lp, nlaunches=nlaunches, sleep_time=sleep)
+        return
+
+    from fireworks.queue.queue_launcher import rapidfire as queue_rapidfire
+    from gow.fw.launchpad import load_qadapter
+
+    qadapter = load_qadapter(qadapter_path)
+    queue_rapidfire(
+        lp,
+        fworker=None,
+        qadapter=qadapter,
+        launch_dir=".",
+        nlaunches=nlaunches,
+        njobs_queue=njobs_queue,
+        sleep_time=sleep,
+        reserve=reserve,
+    )
+
 def _write_summary_json(
     *,
     results_dir: Path,
@@ -475,6 +512,14 @@ def fw_evaluate_cmd(
     ),
     sleep: int = typer.Option(0, "--sleep", help="Seconds to sleep between rocket launches (rapidfire)."),
     nlaunches: int = typer.Option(0, "--nlaunches", help="Max launches for rapidfire (0 means until queue empty)."),
+    launcher: str = typer.Option("local", "--launcher", help="Launcher backend: 'local' or 'queue'."),
+    qadapter: Path | None = typer.Option(
+        None,
+        "--qadapter",
+        help="Path to my_qadapter.yaml, or a directory containing it. Used when --launcher queue.",
+    ),
+    njobs_queue: int = typer.Option(0, "--njobs-queue", min=0, help="Max queued jobs for FireWorks queue rapidfire."),
+    reserve: bool = typer.Option(False, "--reserve/--no-reserve", help="Reserve jobs before launching when using queue rapidfire."),
 ):
     """
     Submit a single-candidate evaluation workflow to FireWorks (optionally launch).
@@ -488,7 +533,6 @@ def fw_evaluate_cmd(
     overrides.update(_parse_kv_params(param))
 
     try:
-        from fireworks.core.rocket_launcher import rapidfire
         from gow.fw.launchpad import load_launchpad
         from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
     except Exception as e:
@@ -526,11 +570,23 @@ def fw_evaluate_cmd(
     typer.echo(f"Submitted workflow. id_map={id_map}  fw_id={fw_id}")
     typer.echo(f"Results dir: {results_dir}")
     typer.echo(f"Launchers dir: {launchers_dir}")
+    typer.echo(f"Launcher: {launcher}")
+    if str(launcher).strip().lower() == "queue":
+        typer.echo(f"QAdapter: {qadapter or 'auto'}")
+        typer.echo(f"njobs_queue: {njobs_queue}")
 
     if launch:
         with _pushd(launchers_dir):
-            rapidfire(lp, nlaunches=nlaunches, sleep_time=sleep)
-        typer.echo("Launch complete for current queue.")
+            _launch_fireworks(
+                lp=lp,
+                mode=launcher,
+                nlaunches=nlaunches,
+                sleep=sleep,
+                qadapter_path=qadapter,
+                njobs_queue=njobs_queue,
+                reserve=reserve,
+            )
+        typer.echo(f"Launch complete for current queue using launcher={launcher}.")
 
 
 @fw_app.command("run")
@@ -555,6 +611,20 @@ def fw_run_cmd(
     ),
     sleep: int = typer.Option(0, "--sleep", help="Seconds to sleep between rocket launches (rapidfire)."),
     nlaunches: int = typer.Option(0, "--nlaunches", help="Max launches for rapidfire (0 means until queue empty)."),
+    launcher: str = typer.Option("local", "--launcher", help="Launcher backend: 'local' or 'queue'."),
+    qadapter: Path | None = typer.Option(
+        None,
+        "--qadapter",
+        help="Path to my_qadapter.yaml, or a directory containing it. Used when --launcher queue.",
+    ),
+    njobs_queue: int = typer.Option(10, "--njobs-queue", min=0, help="Max queued jobs for FireWorks queue rapidfire."),
+    reserve: bool = typer.Option(False, "--reserve/--no-reserve", help="Reserve jobs before launching when using queue rapidfire."),
+    group_size: int = typer.Option(
+        0,
+        "--group-size",
+        min=0,
+        help="Number of candidates per FireWork. 0 means use optimizer batch_size.",
+    ),
 ):
     """
     Submit AND (optionally) launch a full optimization loop using FireWorks.
@@ -562,9 +632,8 @@ def fw_run_cmd(
     NOTE: This is a simple synchronous loop (submit batch -> launch -> read results -> tell).
     """
     try:
-        from fireworks.core.rocket_launcher import rapidfire
         from gow.fw.launchpad import load_launchpad
-        from gow.fw.workflow import SingleEvalSpec, build_single_evaluate_workflow
+        from gow.fw.workflow import BatchEvalSpec, SingleEvalSpec, build_batch_evaluate_workflow
         from gow.optimizer import make_optimizer
     except Exception as e:
         raise typer.BadParameter(str(e)) from e
@@ -601,6 +670,10 @@ def fw_run_cmd(
     typer.echo(f"run_id:  {run_id_val}")
     typer.echo(f"results_dir: {results_dir}")
     typer.echo(f"launchers_dir: {launchers_dir}")
+    typer.echo(f"launcher: {launcher}")
+    if str(launcher).strip().lower() == "queue":
+        typer.echo(f"qadapter: {qadapter or 'auto'}")
+        typer.echo(f"njobs_queue: {njobs_queue}")
     typer.echo(f"max_evaluations={opt_cfg.max_evaluations}  batch_size={opt_cfg.batch_size}")
 
     def _read_candidate_record(workdir: Path) -> dict[str, Any] | None:
@@ -628,6 +701,7 @@ def fw_run_cmd(
         candidates = optimizer.ask(problem, n_batch)
 
         candidate_ids: list[str] = []
+        specs: list[SingleEvalSpec] = []
         for i, cand in enumerate(candidates):
             idx = n_done + i  # global index
             candidate_id = format_candidate_id(
@@ -637,25 +711,49 @@ def fw_run_cmd(
             )
             candidate_ids.append(candidate_id)
 
-            spec = SingleEvalSpec(
-                problem_config=config_abs,
-                outdir=results_dir,
-                run_id=run_id_val,
-                candidate_id=candidate_id,
-                candidate_params=cand,
-                generation_id=generation_id,
-                candidate_index=idx,
-                attempt_index=0,
+            specs.append(
+                SingleEvalSpec(
+                    problem_config=config_abs,
+                    outdir=results_dir,
+                    run_id=run_id_val,
+                    candidate_id=candidate_id,
+                    candidate_params=cand,
+                    generation_id=generation_id,
+                    candidate_index=idx,
+                    attempt_index=0,
+                )
             )
-            wf = build_single_evaluate_workflow(spec)
+
+        effective_group_size = group_size or n_batch
+        for start in range(0, len(specs), effective_group_size):
+            chunk = specs[start : start + effective_group_size]
+            wf = build_batch_evaluate_workflow(
+                BatchEvalSpec(
+                    problem_config=config_abs,
+                    outdir=results_dir,
+                    run_id=run_id_val,
+                    items=chunk,
+                )
+            )
             lp.add_wf(wf)
 
-        typer.echo(f"Submitted batch of {len(candidates)} candidate(s).")
+        typer.echo(
+            f"Submitted batch of {len(candidates)} candidate(s) in "
+            f"{(len(specs) + effective_group_size - 1) // effective_group_size} FireWork group(s)."
+        )
 
         if launch:
             with _pushd(launchers_dir):
-                rapidfire(lp, nlaunches=nlaunches, sleep_time=sleep)
-            typer.echo("Launch complete for current queue.")
+                _launch_fireworks(
+                    lp=lp,
+                    mode=launcher,
+                    nlaunches=nlaunches,
+                    sleep=sleep,
+                    qadapter_path=qadapter,
+                    njobs_queue=njobs_queue,
+                    reserve=reserve,
+                )
+            typer.echo(f"Launch complete for current queue using launcher={launcher}.")
 
         # IMPORTANT:
         # - tell() uses fitness in the *same order* as `candidates`

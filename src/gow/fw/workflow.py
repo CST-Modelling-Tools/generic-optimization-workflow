@@ -20,7 +20,13 @@ def _ensure_fireworks_imports():
 _ensure_fireworks_imports()
 from fireworks import Firework, Workflow  # type: ignore  # noqa: E402
 
-from .tasks import AppendResultJsonlTask, EvaluateCandidateTask, _to_jsonable  # noqa: E402
+from .tasks import (  # noqa: E402
+    AppendBatchResultsTask,
+    AppendResultJsonlTask,
+    EvaluateBatchTask,
+    EvaluateCandidateTask,
+    _to_jsonable,
+)
 
 
 def default_run_id() -> str:
@@ -29,18 +35,41 @@ def default_run_id() -> str:
 
 @dataclass(frozen=True)
 class SingleEvalSpec:
-    problem_config: Path         # path to optimization_specs.yaml
-    outdir: Path                 # flattened results root
+    problem_config: Path
+    outdir: Path
     run_id: str
     candidate_id: str
     candidate_params: Dict[str, Any]
 
-    # Optional metadata (useful for analysis and parity with local mode)
     generation_id: Optional[int] = None
     candidate_index: Optional[int] = None
     attempt_index: int = 0
 
     context_override: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class BatchEvalSpec:
+    problem_config: Path
+    outdir: Path
+    run_id: str
+    items: list[SingleEvalSpec]
+
+
+def _single_item_payload(spec: SingleEvalSpec) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "problem_config": str(Path(spec.problem_config).expanduser().resolve()),
+        "outdir": str(Path(spec.outdir).expanduser().resolve()),
+        "run_id": spec.run_id,
+        "candidate_id": spec.candidate_id,
+        "candidate_params": _to_jsonable(spec.candidate_params),
+        "generation_id": spec.generation_id,
+        "candidate_index": spec.candidate_index,
+        "attempt_index": spec.attempt_index,
+    }
+    if spec.context_override is not None:
+        payload["context_override"] = _to_jsonable(spec.context_override)
+    return payload
 
 
 def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
@@ -54,7 +83,6 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
     problem_config_abs = Path(spec.problem_config).expanduser().resolve()
     outdir_abs = Path(spec.outdir).expanduser().resolve()
 
-    # Load just for validation + problem_id
     problem = load_problem_config(problem_config_abs)
 
     eval_task_params: Dict[str, Any] = {
@@ -63,7 +91,6 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
         "run_id": spec.run_id,
         "candidate_id": spec.candidate_id,
         "candidate_params": _to_jsonable(spec.candidate_params),
-        # propagate metadata for parity with local mode
         "generation_id": spec.generation_id,
         "candidate_index": spec.candidate_index,
         "attempt_index": spec.attempt_index,
@@ -76,13 +103,11 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
         "problem_id": problem.id,
         "run_id": spec.run_id,
         "candidate_id": spec.candidate_id,
-        # propagate metadata for parity with local mode
         "generation_id": spec.generation_id,
         "candidate_index": spec.candidate_index,
         "attempt_index": spec.attempt_index,
     }
 
-    # Single FireWork containing both tasks in sequence.
     fw = Firework(
         [
             EvaluateCandidateTask(eval_task_params),
@@ -100,4 +125,41 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
     )
 
     wf_name = f"gow-single-eval:{problem.id}:{spec.run_id}:{spec.candidate_id}"
+    return Workflow([fw], name=wf_name)
+
+
+def build_batch_evaluate_workflow(spec: BatchEvalSpec) -> Workflow:
+    """
+    Workflow (single FireWork, two Firetasks) for a batch of candidates:
+      1) EvaluateBatchTask -> writes one result.json per candidate workdir
+      2) AppendBatchResultsTask -> appends all records to canonical jsonl files
+    """
+    problem_config_abs = Path(spec.problem_config).expanduser().resolve()
+    outdir_abs = Path(spec.outdir).expanduser().resolve()
+
+    problem = load_problem_config(problem_config_abs)
+    items_payload = [_single_item_payload(item) for item in spec.items]
+    candidate_ids = [item.candidate_id for item in spec.items]
+
+    fw = Firework(
+        [
+            EvaluateBatchTask({"items": items_payload}),
+            AppendBatchResultsTask(
+                {
+                    "outdir": str(outdir_abs),
+                    "problem_id": problem.id,
+                    "run_id": spec.run_id,
+                }
+            ),
+        ],
+        name=f"evaluate+append-batch:{problem.id}:{spec.run_id}:n{len(spec.items)}",
+        spec={
+            "problem_id": problem.id,
+            "run_id": spec.run_id,
+            "candidate_ids": candidate_ids,
+            "batch_size": len(spec.items),
+        },
+    )
+
+    wf_name = f"gow-batch-eval:{problem.id}:{spec.run_id}:n{len(spec.items)}"
     return Workflow([fw], name=wf_name)
