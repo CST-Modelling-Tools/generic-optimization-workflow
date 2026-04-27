@@ -10,6 +10,7 @@ from gow.config import ProblemConfig
 from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
 from gow.output.jsonl import append_jsonl_line
+from gow.fw.tasks import rebuild_problem_results_jsonl, verify_run_results_complete
 
 
 def _optimizer_kwargs(problem: ProblemConfig) -> Dict[str, Any]:
@@ -77,7 +78,6 @@ def run_local_optimization(
     outdir.mkdir(parents=True, exist_ok=True)
     run_root.mkdir(parents=True, exist_ok=True)
 
-    problem_results_path = outdir / "results.jsonl"
     run_results_path = run_root / "results.jsonl"
 
     opt_cfg = problem.optimizer
@@ -165,7 +165,6 @@ def run_local_optimization(
             )
 
             append_jsonl_line(run_results_path, record)
-            append_jsonl_line(problem_results_path, record)
 
             fitness_dicts.append(fit)
 
@@ -202,6 +201,11 @@ def run_local_optimization(
                 )
 
         n_done += n_batch
+
+    ok, actual = verify_run_results_complete(outdir, run_id_val, opt_cfg.max_evaluations)
+    if not ok:
+        raise RuntimeError(f"Run {run_id_val} incomplete: expected {opt_cfg.max_evaluations} results, found {actual}")
+    problem_results_path = rebuild_problem_results_jsonl(outdir)
 
     summary = {
         "problem_id": problem.id,

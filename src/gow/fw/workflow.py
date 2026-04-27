@@ -76,7 +76,9 @@ def build_single_evaluate_workflow(spec: SingleEvalSpec) -> Workflow:
     """
     Workflow (single FireWork, two Firetasks):
       1) EvaluateCandidateTask -> writes runs/<run_id>/<candidate_id>/result.json
-      2) AppendResultJsonlTask -> appends to <outdir>/results.jsonl and runs/<run_id>/results.jsonl
+      2) AppendResultJsonlTask -> appends to runs/<run_id>/results.jsonl
+
+    The problem-level <outdir>/results.jsonl is rebuilt after the run completes.
 
     This design reduces launches by 2x (previously 2 FireWorks per candidate).
     """
@@ -132,7 +134,9 @@ def build_batch_evaluate_workflow(spec: BatchEvalSpec) -> Workflow:
     """
     Workflow (single FireWork, two Firetasks) for a batch of candidates:
       1) EvaluateBatchTask -> writes one result.json per candidate workdir
-      2) AppendBatchResultsTask -> appends all records to canonical jsonl files
+      2) AppendBatchResultsTask -> appends all records to runs/<run_id>/results.jsonl
+
+    The problem-level <outdir>/results.jsonl is rebuilt after the run completes.
     """
     problem_config_abs = Path(spec.problem_config).expanduser().resolve()
     outdir_abs = Path(spec.outdir).expanduser().resolve()

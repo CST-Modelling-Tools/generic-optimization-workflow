@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 import os
 import uuid
 from contextlib import contextmanager
@@ -238,6 +239,151 @@ def _launch_fireworks(
         sleep_time=sleep,
         reserve=reserve,
     )
+
+
+
+def _terminal_fw_state(state: str | None) -> bool:
+    return str(state or "").upper() in {"COMPLETED", "FIZZLED", "ARCHIVED"}
+
+
+def _get_fw_state(lp: Any, fw_id: int | None) -> str | None:
+    if fw_id is None:
+        return None
+    try:
+        if hasattr(lp, "get_fw_by_id"):
+            fw = lp.get_fw_by_id(fw_id)
+            state = getattr(fw, "state", None)
+            if state is not None:
+                return str(state)
+    except Exception:
+        pass
+    try:
+        if hasattr(lp, "get_fw_dict_by_id"):
+            data = lp.get_fw_dict_by_id(fw_id)
+            if isinstance(data, dict) and data.get("state") is not None:
+                return str(data.get("state"))
+    except Exception:
+        pass
+    return None
+
+
+def _extract_fw_ids(id_map: Any) -> list[int]:
+    if isinstance(id_map, dict):
+        out: list[int] = []
+        for value in id_map.values():
+            try:
+                out.append(int(value))
+            except Exception:
+                continue
+        return out
+    return []
+
+
+def _wait_for_batch_results(
+    lp: Any,
+    results_dir: Path,
+    run_id: str,
+    candidate_ids: list[str],
+    fw_ids: list[int],
+    *,
+    poll_seconds: int,
+    wait_timeout: int,
+) -> tuple[bool, list[str]]:
+    started = time.monotonic()
+    missing = list(candidate_ids)
+    while True:
+        missing = []
+        for candidate_id in candidate_ids:
+            result_path = candidate_workdir(results_dir, run_id, candidate_id) / "result.json"
+            if not result_path.exists():
+                missing.append(candidate_id)
+        if not missing:
+            return True, []
+
+        states = [_get_fw_state(lp, fw_id) for fw_id in fw_ids]
+        known_states = [s for s in states if s is not None]
+        if known_states and all(_terminal_fw_state(s) for s in known_states):
+            return False, missing
+
+        if wait_timeout > 0 and (time.monotonic() - started) >= wait_timeout:
+            return False, missing
+
+        time.sleep(max(1, poll_seconds))
+
+
+def _wait_for_candidate_results(
+    lp: Any,
+    results_dir: Path,
+    run_id: str,
+    candidate_ids: list[str],
+    fw_ids: list[int],
+    *,
+    poll_seconds: int,
+    timeout_seconds: int,
+) -> None:
+    ok, missing = _wait_for_batch_results(
+        lp=lp,
+        results_dir=results_dir,
+        run_id=run_id,
+        candidate_ids=candidate_ids,
+        fw_ids=fw_ids,
+        poll_seconds=poll_seconds,
+        wait_timeout=timeout_seconds,
+    )
+    if not ok:
+        raise RuntimeError(f"Missing result.json for candidate(s): {', '.join(missing)}")
+
+
+def _build_missing_result_record(
+    *,
+    problem: Any,
+    results_dir: Path,
+    run_id: str,
+    candidate_id: str,
+    candidate_params: dict[str, Any],
+    generation_id: int | None,
+    candidate_index: int | None,
+    attempt_index: int,
+    reason: str,
+) -> dict[str, Any]:
+    workdir = candidate_workdir(results_dir, run_id, candidate_id)
+    workdir.mkdir(parents=True, exist_ok=True)
+    parts = parse_candidate_id(candidate_id)
+    candidate_local_id = parts.candidate_local_id if parts is not None else None
+    attempt_id = format_attempt_id(candidate_id, attempt_index)
+    record = {
+        "problem_id": problem.id,
+        "run_id": run_id,
+        "generation_id": generation_id,
+        "candidate_index": candidate_index,
+        "candidate_id": candidate_id,
+        "candidate_local_id": candidate_local_id,
+        "attempt_id": attempt_id,
+        "attempt_index": attempt_index,
+        "params": {**problem.runtime_params(), **candidate_params},
+        "fitness": {
+            "status": "failed",
+            "metrics": {},
+            "objective": None,
+            "constraints": {},
+            "artifacts": {},
+            "error": reason,
+            "failure_kind": "missing_result_after_retries",
+        },
+        "failure_kind": "missing_result_after_retries",
+        "returncode": None,
+        "wall_time_s": None,
+        "started_at": None,
+        "finished_at": None,
+        "evaluator": None,
+        "workdir": str(workdir),
+        "stdout_path": str(workdir / "stdout.txt"),
+        "stderr_path": str(workdir / "stderr.txt"),
+        "input_path": str(workdir / "input.json"),
+        "output_path": str(workdir / "output.json"),
+    }
+    (workdir / "result.json").write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    return record
 
 def _write_summary_json(
     *,
@@ -625,6 +771,10 @@ def fw_run_cmd(
         min=0,
         help="Number of candidates per FireWork. 0 means use optimizer batch_size.",
     ),
+    queue_wait: bool = typer.Option(True, "--queue-wait/--no-queue-wait", help="Wait for queue-launched batches to finish before tell()."),
+    queue_poll_seconds: int = typer.Option(10, "--queue-poll-seconds", min=1, help="Polling interval in seconds while waiting for queue batches."),
+    queue_wait_timeout: int = typer.Option(0, "--queue-wait-timeout", min=0, help="Timeout in seconds for waiting on a queue batch. 0 means no timeout."),
+    max_missing_result_retries: int = typer.Option(2, "--max-missing-result-retries", min=0, help="How many times to resubmit candidates missing result.json after terminal queue states."),
 ):
     """
     Submit AND (optionally) launch a full optimization loop using FireWorks.
@@ -633,6 +783,7 @@ def fw_run_cmd(
     """
     try:
         from gow.fw.launchpad import load_launchpad
+        from gow.fw.tasks import append_run_result_record, rebuild_problem_results_jsonl, verify_run_results_complete
         from gow.fw.workflow import BatchEvalSpec, SingleEvalSpec, build_batch_evaluate_workflow
         from gow.optimizer import make_optimizer
     except Exception as e:
@@ -725,35 +876,101 @@ def fw_run_cmd(
             )
 
         effective_group_size = group_size or n_batch
-        for start in range(0, len(specs), effective_group_size):
-            chunk = specs[start : start + effective_group_size]
-            wf = build_batch_evaluate_workflow(
-                BatchEvalSpec(
-                    problem_config=config_abs,
-                    outdir=results_dir,
-                    run_id=run_id_val,
-                    items=chunk,
+        specs_by_candidate_id = {spec.candidate_id: spec for spec in specs}
+        pending_specs = list(specs)
+        retry_counts: dict[str, int] = {spec.candidate_id: 0 for spec in specs}
+
+        while pending_specs:
+            submitted_fw_ids: list[int] = []
+            submitted_candidate_ids: list[str] = []
+            for start in range(0, len(pending_specs), effective_group_size):
+                chunk = pending_specs[start : start + effective_group_size]
+                wf = build_batch_evaluate_workflow(
+                    BatchEvalSpec(
+                        problem_config=config_abs,
+                        outdir=results_dir,
+                        run_id=run_id_val,
+                        items=chunk,
+                    )
                 )
+                id_map = lp.add_wf(wf)
+                submitted_fw_ids.extend(_extract_fw_ids(id_map))
+                submitted_candidate_ids.extend([item.candidate_id for item in chunk])
+
+            typer.echo(
+                f"Submitted batch of {len(submitted_candidate_ids)} candidate(s) in "
+                f"{(len(pending_specs) + effective_group_size - 1) // effective_group_size} FireWork group(s)."
             )
-            lp.add_wf(wf)
 
-        typer.echo(
-            f"Submitted batch of {len(candidates)} candidate(s) in "
-            f"{(len(specs) + effective_group_size - 1) // effective_group_size} FireWork group(s)."
-        )
+            if launch:
+                with _pushd(launchers_dir):
+                    _launch_fireworks(
+                        lp=lp,
+                        mode=launcher,
+                        nlaunches=nlaunches,
+                        sleep=sleep,
+                        qadapter_path=qadapter,
+                        njobs_queue=njobs_queue,
+                        reserve=reserve,
+                    )
+                typer.echo(f"Launch complete for current queue using launcher={launcher}.")
 
-        if launch:
-            with _pushd(launchers_dir):
-                _launch_fireworks(
-                    lp=lp,
-                    mode=launcher,
-                    nlaunches=nlaunches,
-                    sleep=sleep,
-                    qadapter_path=qadapter,
-                    njobs_queue=njobs_queue,
-                    reserve=reserve,
+            is_queue = str(launcher).strip().lower() == "queue"
+            if is_queue and launch and queue_wait:
+                complete, missing_ids = _wait_for_batch_results(
+                    lp,
+                    results_dir,
+                    run_id_val,
+                    submitted_candidate_ids,
+                    submitted_fw_ids,
+                    poll_seconds=queue_poll_seconds,
+                    wait_timeout=queue_wait_timeout,
                 )
-            typer.echo(f"Launch complete for current queue using launcher={launcher}.")
+            else:
+                complete = True
+                missing_ids = []
+
+            if missing_ids:
+                typer.echo(f"Batch ended with {len(missing_ids)} missing result(s).")
+
+            next_pending_specs: list[SingleEvalSpec] = []
+            for missing_id in missing_ids:
+                prev = specs_by_candidate_id[missing_id]
+                retry_counts[missing_id] += 1
+                if retry_counts[missing_id] <= max_missing_result_retries:
+                    next_pending_specs.append(
+                        SingleEvalSpec(
+                            problem_config=prev.problem_config,
+                            outdir=prev.outdir,
+                            run_id=prev.run_id,
+                            candidate_id=prev.candidate_id,
+                            candidate_params=prev.candidate_params,
+                            generation_id=prev.generation_id,
+                            candidate_index=prev.candidate_index,
+                            attempt_index=prev.attempt_index + retry_counts[missing_id],
+                            context_override=prev.context_override,
+                        )
+                    )
+                else:
+                    record = _build_missing_result_record(
+                        problem=problem,
+                        results_dir=results_dir,
+                        run_id=run_id_val,
+                        candidate_id=prev.candidate_id,
+                        candidate_params=prev.candidate_params,
+                        generation_id=prev.generation_id,
+                        candidate_index=prev.candidate_index,
+                        attempt_index=prev.attempt_index + retry_counts[missing_id],
+                        reason=(
+                            f"Missing result.json after {max_missing_result_retries} retry attempts "
+                            f"for candidate {prev.candidate_id}"
+                        ),
+                    )
+                    append_run_result_record(results_dir, run_id_val, record)
+
+            if next_pending_specs:
+                typer.echo(f"Retrying {len(next_pending_specs)} candidate(s) missing results.")
+            pending_specs = next_pending_specs
 
         # IMPORTANT:
         # - tell() uses fitness in the *same order* as `candidates`
@@ -800,6 +1017,13 @@ def fw_run_cmd(
             typer.echo(f"Warning: optimizer.tell failed: {e}")
 
         n_done += n_batch
+
+    ok_run, actual_run = verify_run_results_complete(results_dir, run_id_val, opt_cfg.max_evaluations)
+    if not ok_run:
+        raise RuntimeError(
+            f"Run {run_id_val} incomplete before rebuilding global results: expected {opt_cfg.max_evaluations}, found {actual_run}"
+        )
+    rebuild_problem_results_jsonl(results_dir)
 
     summary_path = _write_summary_json(
         results_dir=results_dir,

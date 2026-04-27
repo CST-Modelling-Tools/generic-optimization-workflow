@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 from gow.candidate_ids import format_candidate_id
-from gow.fw.tasks import AppendBatchResultsTask, EvaluateBatchTask
+from gow.fw.tasks import AppendBatchResultsTask, EvaluateBatchTask, rebuild_problem_results_jsonl
 
 
 def _write_yaml(path: Path, data: dict) -> None:
@@ -170,13 +170,16 @@ def test_evaluate_batch_task_continues_after_single_candidate_exception(tmp_path
         }
     ).run_task({"batch_results": records})
 
-    assert append_action.stored_data["problem_results"].endswith("results.jsonl")
     assert append_action.stored_data["run_results"].endswith("results.jsonl")
 
-    problem_rows = _read_jsonl(outdir / "results.jsonl")
+    assert not (outdir / "results.jsonl").exists()
     run_rows = _read_jsonl(outdir / "runs" / run_id / "results.jsonl")
 
-    assert [r["candidate_id"] for r in problem_rows] == [candidate_ok, candidate_fail]
     assert [r["candidate_id"] for r in run_rows] == [candidate_ok, candidate_fail]
+    assert run_rows[1]["fitness"]["status"] == "failed"
+    assert run_rows[1]["failure_kind"] == "internal_error"
+
+    problem_rows = _read_jsonl(rebuild_problem_results_jsonl(outdir))
+    assert [r["candidate_id"] for r in problem_rows] == [candidate_ok, candidate_fail]
     assert problem_rows[1]["fitness"]["status"] == "failed"
     assert problem_rows[1]["failure_kind"] == "internal_error"
