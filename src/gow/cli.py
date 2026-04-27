@@ -783,7 +783,7 @@ def fw_run_cmd(
     """
     try:
         from gow.fw.launchpad import load_launchpad
-        from gow.fw.tasks import append_run_result_record, rebuild_problem_results_jsonl, verify_run_results_complete
+        from gow.fw.tasks import append_run_result_record, rebuild_problem_results_jsonl, rebuild_run_results_jsonl, verify_run_results_complete
         from gow.fw.workflow import BatchEvalSpec, SingleEvalSpec, build_batch_evaluate_workflow
         from gow.optimizer import make_optimizer
     except Exception as e:
@@ -1021,8 +1021,9 @@ def fw_run_cmd(
     ok_run, actual_run = verify_run_results_complete(results_dir, run_id_val, opt_cfg.max_evaluations)
     if not ok_run:
         raise RuntimeError(
-            f"Run {run_id_val} incomplete before rebuilding global results: expected {opt_cfg.max_evaluations}, found {actual_run}"
+            f"Run {run_id_val} incomplete before rebuilding run/global results: expected {opt_cfg.max_evaluations}, found {actual_run}"
         )
+    rebuild_run_results_jsonl(results_dir, run_id_val)
     rebuild_problem_results_jsonl(results_dir)
 
     summary_path = _write_summary_json(

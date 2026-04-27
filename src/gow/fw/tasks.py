@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from gow.candidate_ids import format_attempt_id, parse_candidate_id
 from gow.config import load_problem_config
@@ -321,6 +321,23 @@ def _iter_jsonl_records(path: Path) -> Iterable[Dict[str, Any]]:
         return
 
 
+def _result_json_path(outdir: Path | str, run_id: str, candidate_id: str) -> Path:
+    return candidate_workdir(Path(outdir).expanduser().resolve(), run_id, candidate_id) / "result.json"
+
+
+def persist_result_record(
+    outdir: Path | str,
+    run_id: str,
+    record: Dict[str, Any],
+) -> Path:
+    outdir = Path(outdir).expanduser().resolve()
+    candidate_id = str(record["candidate_id"])
+    result_path = _result_json_path(outdir, run_id, candidate_id)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    return result_path
+
+
 def append_run_result_record(
     outdir: Path | str,
     run_id: str,
@@ -330,35 +347,64 @@ def append_run_result_record(
     lock_filename: str | None = None,
     skip_if_exists: bool = True,
 ) -> bool:
+    """Backward-compatible wrapper.
+
+    Persist the candidate result in its own workdir only. The run-level JSONL is rebuilt
+    later by the coordinator from result.json files, so workers never contend on a shared
+    run results file.
+    """
+    persist_result_record(outdir, run_id, record)
+    return True
+
+
+def _iter_run_result_json_records(outdir: Path | str, run_id: str) -> Iterable[Dict[str, Any]]:
+    outdir = Path(outdir).expanduser().resolve()
+    run_dir = run_root_dir(outdir, run_id)
+    if not run_dir.exists():
+        return
+    for candidate_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
+        result_path = candidate_dir / "result.json"
+        if not result_path.exists():
+            continue
+        try:
+            obj = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def rebuild_run_results_jsonl(
+    outdir: Path | str,
+    run_id: str,
+    *,
+    results_filename: str = "results.jsonl",
+) -> Path:
     outdir = Path(outdir).expanduser().resolve()
     run_dir = run_root_dir(outdir, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
-
     results_path = run_dir / results_filename
-    lock_path = run_dir / (lock_filename or f"{results_filename}.lock")
 
-    candidate_id = str(record.get("candidate_id", ""))
-    attempt_id = str(record.get("attempt_id")) if record.get("attempt_id") is not None else None
+    records: list[Dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    for obj in _iter_run_result_json_records(outdir, run_id):
+        key = _unique_key(obj)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(obj)
 
-    def _already_appended() -> bool:
-        for obj in _iter_jsonl_records(results_path):
-            rid, aid, cid = _unique_key(obj)
-            if rid != run_id:
-                continue
-            if attempt_id is not None:
-                if aid == attempt_id:
-                    return True
-                continue
-            if cid == candidate_id:
-                return True
-        return False
+    records.sort(key=lambda obj: (
+        obj.get("generation_id") if isinstance(obj.get("generation_id"), int) else 10**12,
+        obj.get("candidate_index") if isinstance(obj.get("candidate_index"), int) else 10**12,
+        str(obj.get("candidate_id", "")),
+        obj.get("attempt_index") if isinstance(obj.get("attempt_index"), int) else 10**12,
+    ))
 
-    lock = FileLock(str(lock_path))
-    with lock:
-        if skip_if_exists and _already_appended():
-            return False
-        append_jsonl_line(results_path, record)
-    return True
+    with results_path.open("w", encoding="utf-8") as f:
+        for obj in records:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    return results_path
 
 
 def verify_run_results_complete(
@@ -369,10 +415,9 @@ def verify_run_results_complete(
     results_filename: str = "results.jsonl",
 ) -> tuple[bool, int]:
     outdir = Path(outdir).expanduser().resolve()
-    run_results_path = run_root_dir(outdir, run_id) / results_filename
     seen: set[tuple[str | None, str | None, str | None]] = set()
     count = 0
-    for obj in _iter_jsonl_records(run_results_path):
+    for obj in _iter_run_result_json_records(outdir, run_id):
         key = _unique_key(obj)
         if key in seen:
             continue
@@ -411,7 +456,6 @@ def rebuild_problem_results_jsonl(
             for obj in records:
                 f.write(json.dumps(obj, ensure_ascii=False) + "\n")
     return results_path
-
 
 
 @explicit_serialize
@@ -565,22 +609,9 @@ class AppendResultJsonlTask(FiretaskBase):
             record["candidate_index"] = idx_filled
 
         outdir.mkdir(parents=True, exist_ok=True)
-
         run_dir = run_root_dir(outdir, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         run_results_path = run_dir / results_filename
-        run_lock_path = run_dir / lock_filename
-        appended_run = None
-        if append_run_level:
-            appended_run = self._append_one(
-                run_results_path,
-                run_lock_path,
-                record,
-                run_id=run_id,
-                candidate_id=candidate_id,
-                attempt_id=attempt_id,
-                skip_if_exists=skip_if_exists,
-            )
 
         return FWAction(
             stored_data={
@@ -588,7 +619,8 @@ class AppendResultJsonlTask(FiretaskBase):
                 "attempt_id": attempt_id,
                 "problem_id": problem_id,
                 "run_results": str(run_results_path),
-                "appended_run": appended_run,
+                "appended_run": None,
+                "deferred_run_rebuild": True,
             }
         )
 
@@ -614,16 +646,12 @@ class AppendBatchResultsTask(AppendResultJsonlTask):
         run_id: str = self["run_id"]
 
         results_filename = str(self.get("results_filename", "results.jsonl"))
-        lock_filename = str(self.get("lock_filename", f"{results_filename}.lock"))
-        skip_if_exists = bool(self.get("skip_if_exists", True))
-        append_run_level = bool(self.get("append_run_level", True))
 
         outdir.mkdir(parents=True, exist_ok=True)
         run_dir = run_root_dir(outdir, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
 
         run_results_path = run_dir / results_filename
-        run_lock_path = run_dir / lock_filename
 
         appended_summary = []
         for record in records:
@@ -641,23 +669,11 @@ class AppendBatchResultsTask(AppendResultJsonlTask):
 
             candidate_id = str(record["candidate_id"])
             attempt_id = str(record.get("attempt_id")) if record.get("attempt_id") is not None else None
-            appended_run = None
-            if append_run_level:
-                appended_run = self._append_one(
-                    run_results_path,
-                    run_lock_path,
-                    record,
-                    run_id=run_id,
-                    candidate_id=candidate_id,
-                    attempt_id=attempt_id,
-                    skip_if_exists=skip_if_exists,
-                )
-
             appended_summary.append(
                 {
                     "candidate_id": candidate_id,
                     "attempt_id": attempt_id,
-                        "appended_run": appended_run,
+                    "appended_run": None,
                 }
             )
 
@@ -666,5 +682,6 @@ class AppendBatchResultsTask(AppendResultJsonlTask):
                 "batch_append": appended_summary,
                 "problem_id": problem_id,
                 "run_results": str(run_results_path),
+                "deferred_run_rebuild": True,
             }
         )

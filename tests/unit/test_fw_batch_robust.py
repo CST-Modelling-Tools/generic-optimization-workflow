@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 from gow.candidate_ids import format_candidate_id
-from gow.fw.tasks import AppendBatchResultsTask, EvaluateBatchTask, rebuild_problem_results_jsonl
+from gow.fw.tasks import AppendBatchResultsTask, EvaluateBatchTask, rebuild_problem_results_jsonl, rebuild_run_results_jsonl
 
 
 def _write_yaml(path: Path, data: dict) -> None:
@@ -173,7 +173,8 @@ def test_evaluate_batch_task_continues_after_single_candidate_exception(tmp_path
     assert append_action.stored_data["run_results"].endswith("results.jsonl")
 
     assert not (outdir / "results.jsonl").exists()
-    run_rows = _read_jsonl(outdir / "runs" / run_id / "results.jsonl")
+    assert not (outdir / "runs" / run_id / "results.jsonl").exists()
+    run_rows = _read_jsonl(rebuild_run_results_jsonl(outdir, run_id))
 
     assert [r["candidate_id"] for r in run_rows] == [candidate_ok, candidate_fail]
     assert run_rows[1]["fitness"]["status"] == "failed"
