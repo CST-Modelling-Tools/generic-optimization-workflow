@@ -11,6 +11,7 @@ from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
 from gow.output.jsonl import append_jsonl_line
 from gow.fw.tasks import rebuild_problem_results_jsonl, rebuild_run_results_jsonl, verify_run_results_complete
+from gow.postprocess import archive_generation_workdirs, finalize_generation
 
 
 def _optimizer_kwargs(problem: ProblemConfig) -> Dict[str, Any]:
@@ -68,6 +69,8 @@ def run_local_optimization(
     *,
     outdir: str | Path = "results",
     run_id: Optional[str] = None,
+    archive_generations: bool = False,
+    delete_archived_workdirs: bool = False,
 ) -> Path:
     outdir = Path(outdir).expanduser().resolve()
     run_id_val = run_id or _default_run_id()
@@ -107,6 +110,7 @@ def run_local_optimization(
         candidates = optimizer.ask(problem, n_batch)
 
         fitness_dicts = []
+        candidate_ids: list[str] = []
         for i, cand in enumerate(candidates):
             candidate_index = n_done + i
             candidate_local_id = format_candidate_local_id(
@@ -118,6 +122,7 @@ def run_local_optimization(
                 candidate_index=candidate_index,
                 run_id=run_id_val,
             )
+            candidate_ids.append(candidate_id)
             attempt_index = 0
             attempt_id = format_attempt_id(candidate_id, attempt_index)
 
@@ -198,6 +203,26 @@ def run_local_optimization(
                     f"non_numeric={n_non_numeric}, "
                     f"non_finite={n_non_finite}"
                 )
+
+        finalize_generation(
+            outdir=outdir,
+            run_id=run_id_val,
+            problem_id=problem.id,
+            generation_id=generation_id,
+            candidate_ids=candidate_ids,
+            max_evaluations=opt_cfg.max_evaluations,
+            direction=direction,
+            completed_generations=(n_done + n_batch + opt_cfg.batch_size - 1) // opt_cfg.batch_size,
+            final=(n_done + n_batch) >= opt_cfg.max_evaluations,
+        )
+        if archive_generations:
+            archive_generation_workdirs(
+                outdir=outdir,
+                run_id=run_id_val,
+                generation_id=generation_id,
+                candidate_ids=candidate_ids,
+                delete_source=delete_archived_workdirs,
+            )
 
         n_done += n_batch
 

@@ -15,6 +15,7 @@ from gow.candidate_ids import format_attempt_id, format_candidate_id, parse_cand
 from gow.config import load_problem_config
 from gow.layout import candidate_workdir, run_launchers_dir, run_root
 from gow.run import run_local_optimization
+from gow.postprocess import archive_generation_workdirs, finalize_generation, merge_runs
 
 app = typer.Typer(help="Generic Optimization Workflow (gow)")
 commands = typer.Typer(help="Commands")
@@ -103,6 +104,12 @@ def _resolve_manual_candidate_id(
             run_id=run_id,
         )
     return "manual"
+
+
+def _coerce_bool_option(value: Any, default: bool = False) -> bool:
+    if type(value).__name__ == "OptionInfo":
+        return default
+    return bool(value)
 
 
 def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -436,6 +443,8 @@ def run_cmd(
         ),
     ),
     run_id: str | None = typer.Option(None, "--run-id", help="Optional run id (defaults to a UUID)."),
+    archive_generations: bool = typer.Option(False, "--archive-generations/--no-archive-generations", help="Archive each completed generation into a single tar.gz."),
+    delete_archived_workdirs: bool = typer.Option(False, "--delete-archived-workdirs/--keep-archived-workdirs", help="Delete candidate workdirs after successfully archiving a generation."),
 ):
     """
     Run a local optimization loop (no FireWorks).
@@ -448,8 +457,10 @@ def run_cmd(
     config_abs = config.expanduser().resolve()
     results_dir = _resolve_results_dir(config_abs, outdir)
 
+    archive_generations = _coerce_bool_option(archive_generations, False)
+    delete_archived_workdirs = _coerce_bool_option(delete_archived_workdirs, False)
     problem = load_problem_config(config_abs)
-    results_path = run_local_optimization(problem, outdir=results_dir, run_id=run_id)
+    results_path = run_local_optimization(problem, outdir=results_dir, run_id=run_id, archive_generations=archive_generations, delete_archived_workdirs=delete_archived_workdirs)
     typer.echo(f"Results: {results_path}")
 
 
@@ -510,6 +521,9 @@ def evaluate_cmd(
     """
     config_abs = config.expanduser().resolve()
     results_dir = _resolve_results_dir(config_abs, outdir)
+
+    archive_generations = _coerce_bool_option(archive_generations, False)
+    delete_archived_workdirs = _coerce_bool_option(delete_archived_workdirs, False)
 
     problem = load_problem_config(config_abs)
 
@@ -604,6 +618,42 @@ def best_cmd(
             typer.echo(f"  direction:    {chosen_direction}")
         if top > 1 and i != top:
             typer.echo("")
+
+
+
+
+@commands.command("merge-runs")
+def merge_runs_cmd(
+    results_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True, help="Results dir (<outdir>)."),
+    target_run_id: str = typer.Option(..., "--target-run-id", help="Run id for the merged output."),
+    source_run_id: list[str] = typer.Option(..., "--source-run-id", help="Source run id to merge (repeatable)."),
+):
+    path = merge_runs(outdir=results_dir, target_run_id=target_run_id, source_run_ids=source_run_id)
+    typer.echo(f"Merged run results: {path}")
+
+
+@commands.command("archive-generation")
+def archive_generation_cmd(
+    results_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True, help="Results dir (<outdir>)."),
+    run_id: str = typer.Option(..., "--run-id", help="Run id."),
+    generation_id: int = typer.Option(..., "--generation-id", min=0, help="Generation id to archive."),
+    delete_source: bool = typer.Option(False, "--delete-source/--keep-source", help="Delete candidate workdirs after archiving."),
+):
+    run_dir = run_root(results_dir, run_id)
+    candidate_ids: list[str] = []
+    if run_dir.exists():
+        for candidate_dir in sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name not in {"launchers", "generations", "archives"}):
+            parts = parse_candidate_id(candidate_dir.name)
+            if parts is not None and parts.generation_id == generation_id:
+                candidate_ids.append(candidate_dir.name)
+    archive_path = archive_generation_workdirs(
+        outdir=results_dir,
+        run_id=run_id,
+        generation_id=generation_id,
+        candidate_ids=candidate_ids,
+        delete_source=delete_source,
+    )
+    typer.echo(f"Archive: {archive_path}")
 
 
 # -----------------------------------------------------------------------------
@@ -775,6 +825,8 @@ def fw_run_cmd(
     queue_poll_seconds: int = typer.Option(10, "--queue-poll-seconds", min=1, help="Polling interval in seconds while waiting for queue batches."),
     queue_wait_timeout: int = typer.Option(0, "--queue-wait-timeout", min=0, help="Timeout in seconds for waiting on a queue batch. 0 means no timeout."),
     max_missing_result_retries: int = typer.Option(2, "--max-missing-result-retries", min=0, help="How many times to resubmit candidates missing result.json after terminal queue states."),
+    archive_generations: bool = typer.Option(False, "--archive-generations/--no-archive-generations", help="Archive each completed generation into a single tar.gz."),
+    delete_archived_workdirs: bool = typer.Option(False, "--delete-archived-workdirs/--keep-archived-workdirs", help="Delete candidate workdirs after successfully archiving a generation."),
 ):
     """
     Submit AND (optionally) launch a full optimization loop using FireWorks.
@@ -791,6 +843,9 @@ def fw_run_cmd(
 
     config_abs = config.expanduser().resolve()
     results_dir = _resolve_results_dir(config_abs, outdir)
+
+    archive_generations = _coerce_bool_option(archive_generations, False)
+    delete_archived_workdirs = _coerce_bool_option(delete_archived_workdirs, False)
 
     problem = load_problem_config(config_abs)
     lp = load_launchpad(launchpad)
@@ -1015,6 +1070,26 @@ def fw_run_cmd(
             optimizer.tell(candidates, fitness_dicts)
         except Exception as e:
             typer.echo(f"Warning: optimizer.tell failed: {e}")
+
+        finalize_generation(
+            outdir=results_dir,
+            run_id=run_id_val,
+            problem_id=problem.id,
+            generation_id=generation_id,
+            candidate_ids=candidate_ids,
+            max_evaluations=opt_cfg.max_evaluations,
+            direction=direction,
+            completed_generations=(n_done + n_batch + opt_cfg.batch_size - 1) // opt_cfg.batch_size,
+            final=(n_done + n_batch) >= opt_cfg.max_evaluations,
+        )
+        if archive_generations:
+            archive_generation_workdirs(
+                outdir=results_dir,
+                run_id=run_id_val,
+                generation_id=generation_id,
+                candidate_ids=candidate_ids,
+                delete_source=delete_archived_workdirs,
+            )
 
         n_done += n_batch
 

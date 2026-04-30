@@ -8,6 +8,7 @@ from gow.candidate_ids import format_attempt_id, parse_candidate_id
 from gow.config import load_problem_config
 from gow.evaluation import evaluate_candidate
 from gow.layout import candidate_workdir, run_root as run_root_dir
+from gow.postprocess import iter_generation_shards
 from gow.output.jsonl import append_jsonl_line
 
 
@@ -387,12 +388,23 @@ def rebuild_run_results_jsonl(
 
     records: list[Dict[str, Any]] = []
     seen: set[tuple[str | None, str | None, str | None]] = set()
-    for obj in _iter_run_result_json_records(outdir, run_id):
-        key = _unique_key(obj)
-        if key in seen:
-            continue
-        seen.add(key)
-        records.append(obj)
+
+    generation_shards = list(iter_generation_shards(outdir, run_id))
+    if generation_shards:
+        for shard_path in generation_shards:
+            for obj in _iter_jsonl_records(shard_path):
+                key = _unique_key(obj)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(obj)
+    else:
+        for obj in _iter_run_result_json_records(outdir, run_id):
+            key = _unique_key(obj)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append(obj)
 
     records.sort(key=lambda obj: (
         obj.get("generation_id") if isinstance(obj.get("generation_id"), int) else 10**12,
@@ -417,12 +429,22 @@ def verify_run_results_complete(
     outdir = Path(outdir).expanduser().resolve()
     seen: set[tuple[str | None, str | None, str | None]] = set()
     count = 0
-    for obj in _iter_run_result_json_records(outdir, run_id):
-        key = _unique_key(obj)
-        if key in seen:
-            continue
-        seen.add(key)
-        count += 1
+    generation_shards = list(iter_generation_shards(outdir, run_id))
+    if generation_shards:
+        for shard_path in generation_shards:
+            for obj in _iter_jsonl_records(shard_path):
+                key = _unique_key(obj)
+                if key in seen:
+                    continue
+                seen.add(key)
+                count += 1
+    else:
+        for obj in _iter_run_result_json_records(outdir, run_id):
+            key = _unique_key(obj)
+            if key in seen:
+                continue
+            seen.add(key)
+            count += 1
     return count >= expected_count, count
 
 
