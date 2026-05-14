@@ -3,6 +3,7 @@ from __future__ import annotations
 from .base import Optimizer
 from .random_search import RandomSearchOptimizer
 from .differential_evolution import DifferentialEvolutionOptimizer
+from .bayesian_optimization import BayesianOptimizationOptimizer
 
 
 def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer:
@@ -14,5 +15,8 @@ def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer
     if name in {"differential_evolution", "de"}:
         # kwargs may include: population_size, mutation_factor, crossover_rate, max_generations
         return DifferentialEvolutionOptimizer(seed=seed, **kwargs)
+
+    if name in {"bayesian", "bayesian_optimization", "bo"}:
+        return BayesianOptimizationOptimizer(seed=seed, **kwargs)
 
     raise ValueError(f"Unknown optimizer: {name}")
