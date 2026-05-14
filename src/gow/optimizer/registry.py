@@ -4,6 +4,7 @@ from .base import Optimizer
 from .random_search import RandomSearchOptimizer
 from .differential_evolution import DifferentialEvolutionOptimizer
 from .cmaes import CMAESOptimizer
+from .bayesian_optimization import BayesianOptimizationOptimizer
 
 
 def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer:
@@ -16,8 +17,10 @@ def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer
         # kwargs may include: population_size, mutation_factor, crossover_rate, max_generations
         return DifferentialEvolutionOptimizer(seed=seed, **kwargs)
 
-    if name in {"cmaes", "cma-es", "cma_es"}:
-        # kwargs may include: population_size, sigma0, max_generations
+    if name in {"cmaes", "cma-es", "covariance_matrix_adaptation"}:
         return CMAESOptimizer(seed=seed, **kwargs)
+
+    if name in {"bayesian", "bayesian_optimization", "bo"}:
+        return BayesianOptimizationOptimizer(seed=seed, **kwargs)
 
     raise ValueError(f"Unknown optimizer: {name}")
