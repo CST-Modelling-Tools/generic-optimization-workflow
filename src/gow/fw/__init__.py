@@ -7,11 +7,12 @@ FireWorks backend (optional dependency).
 Importing this package will raise a clear RuntimeError if FireWorks isn't installed.
 """
 
-from .launchpad import load_launchpad
+from .launchpad import load_launchpad, load_qadapter
 from .workflow import SingleEvalSpec, build_single_evaluate_workflow
 
 __all__ = [
     "load_launchpad",
+    "load_qadapter",
     "SingleEvalSpec",
     "build_single_evaluate_workflow",
 ]

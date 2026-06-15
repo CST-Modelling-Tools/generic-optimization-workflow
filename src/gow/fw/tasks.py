@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from gow.candidate_ids import format_attempt_id, parse_candidate_id
 from gow.config import load_problem_config
 from gow.evaluation import evaluate_candidate
 from gow.layout import candidate_workdir, run_root as run_root_dir
+from gow.postprocess import iter_generation_shards
 from gow.output.jsonl import append_jsonl_line
 
 
@@ -94,6 +95,76 @@ def _unique_key(record: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], O
     return rid, aid, cid
 
 
+def _evaluate_one_candidate(
+    *,
+    problem_config: Path,
+    outdir: Path,
+    run_id: str,
+    candidate_id: str,
+    candidate_params: Dict[str, Any],
+    context_override: Optional[Dict[str, Any]] = None,
+    generation_id: Optional[int] = None,
+    candidate_index: Optional[int] = None,
+    attempt_index: int = 0,
+) -> Dict[str, Any]:
+    generation_id, candidate_index = _fill_generation_metadata(
+        candidate_id=candidate_id,
+        generation_id=generation_id,
+        candidate_index=candidate_index,
+    )
+
+    candidate_parts = parse_candidate_id(candidate_id)
+    candidate_local_id = candidate_parts.candidate_local_id if candidate_parts is not None else None
+    attempt_id = format_attempt_id(candidate_id, attempt_index)
+
+    problem = load_problem_config(problem_config)
+
+    workdir = candidate_workdir(outdir, run_id, candidate_id)
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    res = evaluate_candidate(
+        problem,
+        run_id=run_id,
+        candidate_id=candidate_id,
+        candidate_local_id=candidate_local_id,
+        attempt_id=attempt_id,
+        candidate_params=candidate_params,
+        workdir=workdir,
+        context_override=context_override,
+    )
+
+    stored: Dict[str, Any] = {
+        "problem_id": problem.id,
+        "run_id": run_id,
+        "candidate_id": candidate_id,
+        "candidate_local_id": candidate_local_id,
+        "attempt_id": attempt_id,
+        "generation_id": generation_id,
+        "candidate_index": candidate_index,
+        "attempt_index": attempt_index,
+        "params": _to_jsonable({**problem.runtime_params(), **candidate_params}),
+        "fitness": _to_jsonable(res.fitness.model_dump()),
+        "failure_kind": res.fitness.failure_kind,
+        "returncode": res.returncode,
+        "wall_time_s": res.wall_time_s,
+        "started_at": res.started_at,
+        "finished_at": res.finished_at,
+        "evaluator": _to_jsonable(res.evaluator),
+        "workdir": str(workdir),
+        "stdout_path": str(res.stdout_path),
+        "stderr_path": str(res.stderr_path),
+        "input_path": str(res.input_path),
+        "output_path": str(res.output_path),
+    }
+
+    (workdir / "result.json").write_text(
+        json.dumps(stored, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    return stored
+
+
 # ---------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------
@@ -110,83 +181,312 @@ class EvaluateCandidateTask(FiretaskBase):
     optional_params = ["context_override", "generation_id", "candidate_index", "attempt_index"]
 
     def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
-        problem_config = Path(self["problem_config"]).expanduser()
-        run_id: str = self["run_id"]
-        candidate_id: str = self["candidate_id"]
-        candidate_params: Dict[str, Any] = dict(self["candidate_params"])
-        outdir = Path(self["outdir"]).expanduser().resolve()
-        context_override: Optional[Dict[str, Any]] = self.get("context_override")
+        stored = _evaluate_one_candidate(
+            problem_config=Path(self["problem_config"]).expanduser().resolve(),
+            outdir=Path(self["outdir"]).expanduser().resolve(),
+            run_id=str(self["run_id"]),
+            candidate_id=str(self["candidate_id"]),
+            candidate_params=dict(self["candidate_params"]),
+            context_override=self.get("context_override"),
+            generation_id=self.get("generation_id"),
+            candidate_index=self.get("candidate_index"),
+            attempt_index=int(self.get("attempt_index", 0)),
+        )
+        return FWAction(stored_data=stored, update_spec={"last_result": stored})
 
-        # Fill metadata even if workflow didn't pass it.
-        generation_id_raw = self.get("generation_id")
-        candidate_index_raw = self.get("candidate_index")
-        attempt_index_raw = self.get("attempt_index")
+
+@explicit_serialize
+class EvaluateBatchTask(FiretaskBase):
+    """
+    Evaluate multiple candidates sequentially inside a single FireWork.
+    Each candidate still keeps its own workdir and result.json.
+
+    Robust mode: a failure in one candidate is converted into a failed record
+    so the rest of the batch can continue executing.
+    """
+    required_params = ["items"]
+
+    def _failed_record_from_exception(self, item: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+        problem_config = Path(item["problem_config"]).expanduser().resolve()
+        outdir = Path(item["outdir"]).expanduser().resolve()
+        run_id = str(item["run_id"])
+        candidate_id = str(item["candidate_id"])
+        candidate_params = dict(item.get("candidate_params", {}))
+        generation_id = item.get("generation_id")
+        candidate_index = item.get("candidate_index")
+        attempt_index = int(item.get("attempt_index", 0))
+
         generation_id, candidate_index = _fill_generation_metadata(
             candidate_id=candidate_id,
-            generation_id=generation_id_raw if isinstance(generation_id_raw, int) else generation_id_raw,
-            candidate_index=candidate_index_raw if isinstance(candidate_index_raw, int) else candidate_index_raw,
+            generation_id=generation_id,
+            candidate_index=candidate_index,
         )
-        attempt_index = attempt_index_raw if isinstance(attempt_index_raw, int) else 0
+
         candidate_parts = parse_candidate_id(candidate_id)
         candidate_local_id = candidate_parts.candidate_local_id if candidate_parts is not None else None
         attempt_id = format_attempt_id(candidate_id, attempt_index)
 
-        problem = load_problem_config(problem_config)
-
         workdir = candidate_workdir(outdir, run_id, candidate_id)
         workdir.mkdir(parents=True, exist_ok=True)
 
-        res = evaluate_candidate(
-            problem,
-            run_id=run_id,
-            candidate_id=candidate_id,
-            candidate_local_id=candidate_local_id,
-            attempt_id=attempt_id,
-            candidate_params=candidate_params,
-            workdir=workdir,
-            context_override=context_override,
-        )
+        problem_id: Optional[str] = None
+        runtime_params: Dict[str, Any] = {}
+        try:
+            problem = load_problem_config(problem_config)
+            problem_id = problem.id
+            runtime_params = problem.runtime_params()
+        except Exception:
+            # If even the config cannot be loaded, preserve the candidate record
+            # without aborting the whole batch.
+            pass
 
-        stored: Dict[str, Any] = {
-            "problem_id": problem.id,
+        fitness = {
+            "status": "failed",
+            "metrics": {},
+            "objective": None,
+            "constraints": {},
+            "artifacts": {},
+            "error": f"Unhandled batch exception: {exc}",
+            "failure_kind": "internal_error",
+        }
+
+        record: Dict[str, Any] = {
+            "problem_id": problem_id,
             "run_id": run_id,
             "candidate_id": candidate_id,
             "candidate_local_id": candidate_local_id,
             "attempt_id": attempt_id,
-            # include generation metadata (doesn't change folder layout)
             "generation_id": generation_id,
             "candidate_index": candidate_index,
             "attempt_index": attempt_index,
-            "params": _to_jsonable({**problem.runtime_params(), **candidate_params}),
-            "fitness": _to_jsonable(res.fitness.model_dump()),
-            "failure_kind": res.fitness.failure_kind,
-            "returncode": res.returncode,
-            "wall_time_s": res.wall_time_s,
-            "started_at": res.started_at,
-            "finished_at": res.finished_at,
-            "evaluator": _to_jsonable(res.evaluator),
+            "params": _to_jsonable({**runtime_params, **candidate_params}),
+            "fitness": _to_jsonable(fitness),
+            "failure_kind": "internal_error",
+            "returncode": None,
+            "wall_time_s": None,
+            "started_at": None,
+            "finished_at": None,
+            "evaluator": None,
             "workdir": str(workdir),
-            "stdout_path": str(res.stdout_path),
-            "stderr_path": str(res.stderr_path),
-            "input_path": str(res.input_path),
-            "output_path": str(res.output_path),
+            "stdout_path": str(workdir / "stdout.txt"),
+            "stderr_path": str(workdir / "stderr.txt"),
+            "input_path": str(workdir / "input.json"),
+            "output_path": str(workdir / "output.json"),
         }
 
         (workdir / "result.json").write_text(
-            json.dumps(stored, indent=2, sort_keys=True),
+            json.dumps(record, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        return record
 
-        return FWAction(stored_data=stored, update_spec={"last_result": stored})
+    def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
+        records: list[Dict[str, Any]] = []
+        for item in self["items"]:
+            try:
+                record = _evaluate_one_candidate(
+                    problem_config=Path(item["problem_config"]).expanduser().resolve(),
+                    outdir=Path(item["outdir"]).expanduser().resolve(),
+                    run_id=str(item["run_id"]),
+                    candidate_id=str(item["candidate_id"]),
+                    candidate_params=dict(item["candidate_params"]),
+                    context_override=item.get("context_override"),
+                    generation_id=item.get("generation_id"),
+                    candidate_index=item.get("candidate_index"),
+                    attempt_index=int(item.get("attempt_index", 0)),
+                )
+            except Exception as exc:
+                record = self._failed_record_from_exception(item, exc)
+            records.append(record)
+
+        return FWAction(
+            stored_data={"batch_results": records},
+            update_spec={"batch_results": records},
+        )
+
+
+def _iter_jsonl_records(path: Path) -> Iterable[Dict[str, Any]]:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    yield obj
+    except FileNotFoundError:
+        return
+
+
+def _result_json_path(outdir: Path | str, run_id: str, candidate_id: str) -> Path:
+    return candidate_workdir(Path(outdir).expanduser().resolve(), run_id, candidate_id) / "result.json"
+
+
+def persist_result_record(
+    outdir: Path | str,
+    run_id: str,
+    record: Dict[str, Any],
+) -> Path:
+    outdir = Path(outdir).expanduser().resolve()
+    candidate_id = str(record["candidate_id"])
+    result_path = _result_json_path(outdir, run_id, candidate_id)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    return result_path
+
+
+def append_run_result_record(
+    outdir: Path | str,
+    run_id: str,
+    record: Dict[str, Any],
+    *,
+    results_filename: str = "results.jsonl",
+    lock_filename: str | None = None,
+    skip_if_exists: bool = True,
+) -> bool:
+    """Backward-compatible wrapper.
+
+    Persist the candidate result in its own workdir only. The run-level JSONL is rebuilt
+    later by the coordinator from result.json files, so workers never contend on a shared
+    run results file.
+    """
+    persist_result_record(outdir, run_id, record)
+    return True
+
+
+def _iter_run_result_json_records(outdir: Path | str, run_id: str) -> Iterable[Dict[str, Any]]:
+    outdir = Path(outdir).expanduser().resolve()
+    run_dir = run_root_dir(outdir, run_id)
+    if not run_dir.exists():
+        return
+    for candidate_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
+        result_path = candidate_dir / "result.json"
+        if not result_path.exists():
+            continue
+        try:
+            obj = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def rebuild_run_results_jsonl(
+    outdir: Path | str,
+    run_id: str,
+    *,
+    results_filename: str = "results.jsonl",
+) -> Path:
+    outdir = Path(outdir).expanduser().resolve()
+    run_dir = run_root_dir(outdir, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    results_path = run_dir / results_filename
+
+    records: list[Dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+
+    generation_shards = list(iter_generation_shards(outdir, run_id))
+    if generation_shards:
+        for shard_path in generation_shards:
+            for obj in _iter_jsonl_records(shard_path):
+                key = _unique_key(obj)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(obj)
+    else:
+        for obj in _iter_run_result_json_records(outdir, run_id):
+            key = _unique_key(obj)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append(obj)
+
+    records.sort(key=lambda obj: (
+        obj.get("generation_id") if isinstance(obj.get("generation_id"), int) else 10**12,
+        obj.get("candidate_index") if isinstance(obj.get("candidate_index"), int) else 10**12,
+        str(obj.get("candidate_id", "")),
+        obj.get("attempt_index") if isinstance(obj.get("attempt_index"), int) else 10**12,
+    ))
+
+    with results_path.open("w", encoding="utf-8") as f:
+        for obj in records:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    return results_path
+
+
+def verify_run_results_complete(
+    outdir: Path | str,
+    run_id: str,
+    expected_count: int,
+    *,
+    results_filename: str = "results.jsonl",
+) -> tuple[bool, int]:
+    outdir = Path(outdir).expanduser().resolve()
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    count = 0
+    generation_shards = list(iter_generation_shards(outdir, run_id))
+    if generation_shards:
+        for shard_path in generation_shards:
+            for obj in _iter_jsonl_records(shard_path):
+                key = _unique_key(obj)
+                if key in seen:
+                    continue
+                seen.add(key)
+                count += 1
+    else:
+        for obj in _iter_run_result_json_records(outdir, run_id):
+            key = _unique_key(obj)
+            if key in seen:
+                continue
+            seen.add(key)
+            count += 1
+    return count >= expected_count, count
+
+
+def rebuild_problem_results_jsonl(
+    outdir: Path | str,
+    *,
+    results_filename: str = "results.jsonl",
+    lock_filename: str | None = None,
+) -> Path:
+    outdir = Path(outdir).expanduser().resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    results_path = outdir / results_filename
+    lock_path = outdir / (lock_filename or f"{results_filename}.lock")
+    runs_root = outdir / "runs"
+
+    records: list[Dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    if runs_root.exists():
+        for run_dir in sorted(p for p in runs_root.iterdir() if p.is_dir()):
+            run_results_path = run_dir / results_filename
+            for obj in _iter_jsonl_records(run_results_path):
+                key = _unique_key(obj)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(obj)
+
+    lock = FileLock(str(lock_path))
+    with lock:
+        with results_path.open("w", encoding="utf-8") as f:
+            for obj in records:
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    return results_path
 
 
 @explicit_serialize
 class AppendResultJsonlTask(FiretaskBase):
     """
     Append <workdir>/result.json as one line to:
-      1) <outdir>/results.jsonl
-      2) <outdir>/runs/<run_id>/results.jsonl  (optional)
+      1) <outdir>/runs/<run_id>/results.jsonl
 
+    The global <outdir>/results.jsonl is rebuilt only after a run completes.
     Uses file locks to prevent corruption under parallel execution.
     Idempotent by (run_id, attempt_id), falling back to (run_id, candidate_id)
     for legacy records without attempt metadata.
@@ -292,7 +592,6 @@ class AppendResultJsonlTask(FiretaskBase):
         if record.get("candidate_local_id") is None and parts is not None:
             record["candidate_local_id"] = parts.candidate_local_id
 
-        # --- HARD CONSISTENCY CHECKS (this prevents the mixed naming issue) ---
         rec_pid = record.get("problem_id")
         if rec_pid and rec_pid != problem_id:
             raise RuntimeError(
@@ -319,7 +618,6 @@ class AppendResultJsonlTask(FiretaskBase):
                 f"(workdir={workdir})"
             )
 
-        # Ensure generation metadata is present even if upstream didn't provide it.
         task_gen = self.get("generation_id")
         task_idx = self.get("candidate_index")
         gen_filled, idx_filled = _fill_generation_metadata(
@@ -333,46 +631,79 @@ class AppendResultJsonlTask(FiretaskBase):
             record["candidate_index"] = idx_filled
 
         outdir.mkdir(parents=True, exist_ok=True)
-
         run_dir = run_root_dir(outdir, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
-
-        # 1) problem-level canonical file (flat)
-        problem_results_path = outdir / results_filename
-        problem_lock_path = outdir / lock_filename
-        appended_problem = self._append_one(
-            problem_results_path,
-            problem_lock_path,
-            record,
-            run_id=run_id,
-            candidate_id=candidate_id,
-            attempt_id=attempt_id,
-            skip_if_exists=skip_if_exists,
-        )
-
-        # 2) per-run convenience file (optional)
         run_results_path = run_dir / results_filename
-        run_lock_path = run_dir / lock_filename
-        appended_run = None
-        if append_run_level:
-            appended_run = self._append_one(
-                run_results_path,
-                run_lock_path,
-                record,
-                run_id=run_id,
-                candidate_id=candidate_id,
-                attempt_id=attempt_id,
-                skip_if_exists=skip_if_exists,
-            )
 
         return FWAction(
             stored_data={
                 "candidate_id": candidate_id,
                 "attempt_id": attempt_id,
                 "problem_id": problem_id,
-                "problem_results": str(problem_results_path),
                 "run_results": str(run_results_path),
-                "appended_problem": appended_problem,
-                "appended_run": appended_run,
+                "appended_run": None,
+                "deferred_run_rebuild": True,
+            }
+        )
+
+
+@explicit_serialize
+class AppendBatchResultsTask(AppendResultJsonlTask):
+    """
+    Append a batch of already evaluated candidate records to the canonical jsonl files.
+    """
+    required_params = ["outdir", "problem_id", "run_id"]
+    optional_params = [
+        "results_filename",
+        "lock_filename",
+        "skip_if_exists",
+        "append_run_level",
+    ]
+
+    def run_task(self, fw_spec: Dict[str, Any]) -> FWAction:
+        records = list(fw_spec.get("batch_results") or [])
+
+        outdir = Path(self["outdir"]).expanduser().resolve()
+        problem_id: str = self["problem_id"]
+        run_id: str = self["run_id"]
+
+        results_filename = str(self.get("results_filename", "results.jsonl"))
+
+        outdir.mkdir(parents=True, exist_ok=True)
+        run_dir = run_root_dir(outdir, run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        run_results_path = run_dir / results_filename
+
+        appended_summary = []
+        for record in records:
+            rec_pid = record.get("problem_id")
+            if rec_pid and str(rec_pid) != str(problem_id):
+                raise RuntimeError(
+                    f"Record problem_id={rec_pid!r} does not match task problem_id={problem_id!r}"
+                )
+
+            rec_rid = record.get("run_id")
+            if rec_rid is not None and str(rec_rid) != str(run_id):
+                raise RuntimeError(
+                    f"Record run_id={rec_rid!r} does not match task run_id={run_id!r}"
+                )
+
+            candidate_id = str(record["candidate_id"])
+            attempt_id = str(record.get("attempt_id")) if record.get("attempt_id") is not None else None
+            appended_summary.append(
+                {
+                    "candidate_id": candidate_id,
+                    "attempt_id": attempt_id,
+                    "appended_run": None,
+                }
+            )
+
+        return FWAction(
+            stored_data={
+                "batch_append": appended_summary,
+                "problem_id": problem_id,
+                "run_results": str(run_results_path),
+                "deferred_run_rebuild": True,
             }
         )

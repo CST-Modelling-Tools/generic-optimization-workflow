@@ -5,8 +5,12 @@ from .random_search import RandomSearchOptimizer
 from .differential_evolution import DifferentialEvolutionOptimizer
 from .cmaes import CMAESOptimizer
 from .bayesian_optimization import BayesianOptimizationOptimizer
+<<<<<<< HEAD
 from .saasbo import SAASBOOptimizer
 from .genetic_algorithm import GeneticAlgorithmOptimizer
+=======
+
+>>>>>>> origin/gow-optimizers-htc-unified
 
 def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer:
     name = name.lower().strip()
@@ -24,6 +28,7 @@ def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer
     if name in {"bayesian", "bayesian_optimization", "bo"}:
         return BayesianOptimizationOptimizer(seed=seed, **kwargs)
 
+<<<<<<< HEAD
     if name in {"saasbo", "saas_bo"}:
         return SAASBOOptimizer(seed=seed, **kwargs)
 
@@ -31,3 +36,6 @@ def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer
         return GeneticAlgorithmOptimizer(seed=seed, **kwargs)
 
     raise ValueError(f"Unknown optimizer: {name}")
+=======
+    raise ValueError(f"Unknown optimizer: {name}")
+>>>>>>> origin/gow-optimizers-htc-unified
