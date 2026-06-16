@@ -55,7 +55,7 @@ class GeneticAlgorithmOptimizer(Optimizer):
         ranked = sorted(
             zip(self._population, self._fitness),
             key=lambda x: x[1],
-            reverse=True,
+            reverse=False,
         )
 
         elites = [dict(x[0]) for x in ranked[:elite_count]]
@@ -108,7 +108,7 @@ class GeneticAlgorithmOptimizer(Optimizer):
 
         return {
             "generation": self._generation,
-            "best_fitness": max(self._fitness),
+            "best_fitness": min(self._fitness),
         }
 
     def _initialize(self, problem):
@@ -157,41 +157,54 @@ class GeneticAlgorithmOptimizer(Optimizer):
         return ind
 
     def _tournament_select(self):
-
         idxs = self._rng.sample(
             range(len(self._population)),
             self.tournament_size,
         )
 
-        best_idx = max(idxs, key=lambda i: self._fitness[i])
+        best_idx = min(idxs, key=lambda i: self._fitness[i])
 
         return dict(self._population[best_idx])
 
     def _crossover(self, p1, p2):
-
         child = {}
 
         for name in self._param_names:
+            kind, lo, hi = self._param_specs[name]
 
-            if self._rng.random() < self.crossover_rate:
-                child[name] = p1[name]
+            if kind == "real":
+                if self._rng.random() < self.crossover_rate:
+                    alpha = self._rng.random()
+                    value = alpha * p1[name] + (1.0 - alpha) * p2[name]
+                else:
+                    value = p1[name]
+
+                child[name] = min(max(value, lo), hi)
+
             else:
-                child[name] = p2[name]
+                child[name] = (
+                    p1[name]
+                    if self._rng.random() < 0.5
+                    else p2[name]
+                )
 
         return child
 
     def _mutate(self, child):
-
         for name in self._param_names:
-
             if self._rng.random() < self.mutation_rate:
-
                 kind, lo, hi = self._param_specs[name]
 
                 if kind == "real":
-                    child[name] = self._rng.uniform(lo, hi)
+                    span = hi - lo
+                    sigma = 0.05 * span
+                    value = child[name] + self._rng.gauss(0.0, sigma)
+                    child[name] = min(max(value, lo), hi)
 
                 else:
-                    child[name] = self._rng.randint(int(lo), int(hi))
+                    child[name] = self._rng.randint(
+                        int(lo),
+                        int(hi),
+                    )
 
         return child
