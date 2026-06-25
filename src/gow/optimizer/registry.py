@@ -6,7 +6,9 @@ from .differential_evolution import DifferentialEvolutionOptimizer
 from .cmaes import CMAESOptimizer
 from .bayesian_optimization import BayesianOptimizationOptimizer
 from .genetic_algorithm import GeneticAlgorithmOptimizer
-
+from .asa import ASAOptimizer
+from .acor import ACOROptimizer
+from .particle_swarm import ParticleSwarmOptimizer
 
 def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer:
     name = name.lower().strip()
@@ -29,5 +31,15 @@ def make_optimizer(name: str, *, seed: int | None = None, **kwargs) -> Optimizer
 
     if name in {"ga", "genetic", "genetic_algorithm"}:
         return GeneticAlgorithmOptimizer(seed=seed, **kwargs)
+    
+    if name in {"asa", "adaptive_simulated_annealing", "adaptive_sa"}:
+        return ASAOptimizer(seed=seed, **kwargs)
 
+    if name in {"acor"}:
+        return ACOROptimizer(seed=seed, **kwargs)
+    
+    if name in {"pso", "particle_swarm", "particle_swarm_optimization"}:
+        return ParticleSwarmOptimizer(seed=seed, **kwargs)
+    
+    
     raise ValueError(f"Unknown optimizer: {name}")
