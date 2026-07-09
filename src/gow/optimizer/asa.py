@@ -40,6 +40,25 @@ It supports bounded RealParam and IntParam parameters. Categorical parameters
 are rejected unless they are encoded numerically before reaching this optimizer.
 """
 
+# -----------------------------------------------------------------------------
+# Beginner reading guide
+# -----------------------------------------------------------------------------
+# Lines that start with '#' are comments. Python ignores them when executing
+# the file. They are included only to help a reader follow the optimizer.
+#
+# Key Python ideas used here:
+#   - A class groups related data and behavior.
+#   - A method is a function that belongs to a class.
+#   - 'self' means the current ASA optimizer object.
+#   - A dictionary stores values by name, for example {'p0': 1.2}.
+#   - A list stores several values in order.
+#   - None means that a value does not exist yet.
+#   - Optional[...] means a value can exist or can be None.
+#   - GOW calls ask() to request candidates and tell() to return results.
+#
+# Maintenance rule for this commented version:
+#   The executable ASA code is kept intact. Only '#' comments were added.
+
 import math
 import random
 from dataclasses import dataclass
@@ -50,7 +69,12 @@ from gow.config.models import CategoricalParam, IntParam, ProblemConfig, RealPar
 from .base import Optimizer
 
 
+# @dataclass asks Python to automatically create simple storage behavior for
+# the _State container below.
 @dataclass
+# _State is an internal container for one ASA state or candidate.
+# It keeps the real values, normalized values, score, cost, and metadata
+# together so they can be passed around as one object.
 class _State:
     """
     Internal ASA state.
@@ -78,6 +102,8 @@ class _State:
     metadata: Optional[Dict[str, Any]] = None
 
 
+# ASAOptimizer is the main optimizer class used by GOW when the YAML selects
+# the ASA optimizer. It inherits from the common Optimizer base class.
 class ASAOptimizer(Optimizer):
     """
     Adaptive Simulated Annealing optimizer adapted to GOW.
@@ -158,6 +184,10 @@ class ASAOptimizer(Optimizer):
         sensitivity_floor: float = 1.0e-18,
         **kwargs: Any,
     ) -> None:
+        # __init__ runs once when the optimizer object is created.
+        # It stores YAML settings such as temperatures, batch size, and restart options.
+        # It also creates empty internal variables that will be filled later by ask() and tell().
+        # No candidate is evaluated in this method.
         if max_evaluations is not None:
             max_iterations = int(max_evaluations)
 
@@ -260,6 +290,8 @@ class ASAOptimizer(Optimizer):
         self._n_non_numeric: int = 0
         self._n_non_finite: int = 0
 
+        # Validate configuration values before the run starts. This prevents
+        # invalid YAML settings from reaching the optimization loop.
         self._validate_config()
 
     # ------------------------------------------------------------------
@@ -270,6 +302,10 @@ class ASAOptimizer(Optimizer):
         """
         Return n candidate parameter dictionaries to GOW.
         """
+        # ask() is called by GOW when it needs new candidates to evaluate.
+        # The first call initializes ASA from the GOW problem: parameter names, bounds, and initial values.
+        # Then ASA generates n candidate states and returns only their real parameter values to GOW.
+        # The evaluator is outside this file; ask() only proposes candidate parameter dictionaries.
         if self._done:
             return []
 
@@ -293,6 +329,10 @@ class ASAOptimizer(Optimizer):
         """
         Update optimizer state from evaluated candidates and fitness dicts.
         """
+        # tell() is called by GOW after the evaluator has computed fitness results.
+        # Each candidate is matched with one fitness result in the same list position.
+        # ASA converts fitness into an internal score, decides whether to accept each candidate,
+        # updates counters, cools temperatures, and may trigger reannealing or a soft restart.
         if not self._initialized:
             raise RuntimeError("tell() called before first ask(); ASA is not initialized.")
 
@@ -337,12 +377,19 @@ class ASAOptimizer(Optimizer):
                 proposed = _State(
                     values=dict(candidate),
                     normalized=normalized,
+            # Each processed evaluation cools the cost temperature. This makes
+            # the search gradually more selective.
                     score=score,
                     cost=-score,
                     metadata=metadata,
+            # Reannealing is an adaptation step. It adjusts temperatures or
+            # sigmas using information collected during recent evaluations.
                 )
 
             accepted = self._process_proposed_state(proposed)
+            # A soft restart is only considered when restart_interval is active.
+            # It helps the optimizer continue after a long period without a new
+            # best solution.
 
             self._evaluations_seen += 1
             self._cool_cost_temperature(accepted=accepted)
@@ -364,10 +411,13 @@ class ASAOptimizer(Optimizer):
 
     def is_done(self) -> bool:
         """Return true when ASA has reached max_iterations."""
+        # GOW uses this method to know whether ASA has reached its stopping condition.
         return self._done or self._evaluations_seen >= self.max_iterations
 
     def diagnostics(self) -> Dict[str, Any]:
         """Return small JSON-serializable diagnostics."""
+        # This method reports the current state of the optimizer without changing it.
+        # The returned dictionary can be serialized to JSON and inspected in logs.
         total_decisions = self.accepted_count + self.rejected_count
         acceptance_rate = None if total_decisions == 0 else self.accepted_count / total_decisions
         worse_acceptance_rate = (
@@ -435,6 +485,9 @@ class ASAOptimizer(Optimizer):
         If include_initial_candidate is enabled, the first emitted candidate is
         the YAML value candidate.
         """
+        # This internal method creates the candidate states that ask() will return.
+        # ASA works in normalized [0, 1] space so all parameters share the same scale.
+        # After mutation, candidates are converted back to real parameter values for GOW.
         out: List[_State] = []
 
         if self.include_initial_candidate and not self._initial_candidate_emitted:
@@ -486,6 +539,10 @@ class ASAOptimizer(Optimizer):
         Returns:
             True if accepted, False otherwise.
         """
+        # This method contains the ASA accept/reject decision.
+        # Better candidates are accepted directly. Worse candidates can still be accepted
+        # with a probability controlled by the current cost temperature.
+        # That is the mechanism that helps simulated annealing escape local minima.
         if proposed.score == float("-inf") or proposed.cost is None:
             self.rejected_count += 1
             self.window_total += 1
@@ -550,6 +607,9 @@ class ASAOptimizer(Optimizer):
         asa_logistic:
             p = 1 / (1 + exp(delta_cost / T_cost))
         """
+        # This method computes the probability of accepting a worse move.
+        # A high temperature gives worse moves a better chance of being accepted.
+        # A low temperature makes ASA behave more strictly.
         temperature = max(self.cost_temperature, 1.0e-300)
         ratio = delta_cost / temperature
 
@@ -571,6 +631,9 @@ class ASAOptimizer(Optimizer):
         """
         Mutate a subset of parameters in normalized space.
         """
+        # This method changes a subset of parameters in normalized [0, 1] space.
+        # Only some parameters are mutated in each proposal, controlled by the mutation fraction.
+        # Each changed parameter also advances its own temperature schedule.
         candidate = dict(base)
 
         fraction = self._current_mutation_parameter_fraction()
@@ -617,6 +680,8 @@ class ASAOptimizer(Optimizer):
 
         where u ~ U(0, 1).
         """
+        # This method generates one ASA step using the Ingber-style heavy-tailed distribution.
+        # Heavy-tailed means ASA usually makes small moves but still has a chance to make larger jumps.
         temperature = max(float(temperature), 1.0e-300)
 
         u = self._rng.random()
@@ -633,6 +698,8 @@ class ASAOptimizer(Optimizer):
         """
         Linearly decrease mutated parameter fraction during the run.
         """
+        # This method computes how many parameters should be mutated as the run progresses.
+        # At the beginning, more parameters may change together. Later, fewer parameters may change.
         if self.max_iterations <= 1:
             progress = 1.0
         else:
@@ -654,6 +721,8 @@ class ASAOptimizer(Optimizer):
         For the Ingber-style schedule, the cost temperature index is advanced
         by accepted states. For geometric mode, it is advanced every evaluation.
         """
+        # This method updates the cost temperature after an evaluation is processed.
+        # The cost temperature controls acceptance of worse candidates.
         if self.temperature_schedule == "geometric":
             self.cost_temperature = max(
                 self.final_temperature,
@@ -679,6 +748,8 @@ class ASAOptimizer(Optimizer):
         """
         Refresh one parameter temperature from its annealing index and multiplier.
         """
+        # This method updates the temperature of one parameter after that parameter is mutated.
+        # Parameter temperature controls the scale of future steps for that parameter.
         if self.temperature_schedule == "geometric":
             current = self.param_temperatures[name] * self.cooling_rate
             self.param_temperatures[name] = max(self.param_final_temperatures[name], current)
@@ -717,6 +788,8 @@ class ASAOptimizer(Optimizer):
 
         c is chosen so that T(max_iterations) is approximately final.
         """
+        # This method computes the ASA temperature schedule.
+        # The schedule depends on the number of parameters, so the cooling is dimension-aware.
         initial = max(float(initial), 1.0e-300)
         final = max(float(final), 1.0e-300)
         index = max(0, int(index))
@@ -740,6 +813,8 @@ class ASAOptimizer(Optimizer):
         """
         Return ASA cooling coefficient for diagnostics.
         """
+        # This helper computes the cooling coefficient used by the ASA schedule.
+        # It is mainly useful for diagnostics.
         initial = max(float(initial), 1.0e-300)
         final = max(float(final), 1.0e-300)
 
@@ -759,6 +834,8 @@ class ASAOptimizer(Optimizer):
         """
         Reanneal according to selected method.
         """
+        # This method chooses and applies the configured reannealing strategy.
+        # Reannealing adapts the search using acceptance-rate and/or sensitivity information.
         if self.reannealing_method == "none":
             self._reset_reanneal_windows()
             return
@@ -783,6 +860,8 @@ class ASAOptimizer(Optimizer):
         Adapt Gaussian sigma and lightly rescale parameter temperatures using
         recent acceptance behavior.
         """
+        # This reannealing method uses recent acceptance rate to adapt step sizes.
+        # If too few moves are accepted, steps are reduced. If many are accepted, steps can expand.
         if self.window_total <= 0:
             return
 
@@ -834,6 +913,8 @@ class ASAOptimizer(Optimizer):
         More sensitive parameters get lower temperatures. Less sensitive
         parameters are allowed broader moves.
         """
+        # This reannealing method estimates how sensitive the cost is to each parameter.
+        # More sensitive parameters receive lower temperatures; less sensitive parameters can move more broadly.
         sensitivities: Dict[str, float] = {}
 
         for name in self._param_names:
@@ -869,6 +950,8 @@ class ASAOptimizer(Optimizer):
         Rescale parameter temperature while preserving ASA schedule through a
         multiplier. This avoids losing reannealing effects at the next refresh.
         """
+        # This method changes one parameter temperature while preserving the scheduled ASA cooling.
+        # The change is stored as a multiplier so the effect survives later temperature refreshes.
         current = self.param_temperatures[name]
         target = current * factor
 
@@ -898,6 +981,7 @@ class ASAOptimizer(Optimizer):
         """
         Reset window counters after reannealing.
         """
+        # This method clears the temporary counters used during one reannealing window.
         self.window_accepted = 0
         self.window_total = 0
 
@@ -913,6 +997,8 @@ class ASAOptimizer(Optimizer):
 
         This is a GOW-practical option to recover from frozen chains.
         """
+        # This method restarts the current state near the best solution found so far.
+        # It is a soft restart because it does not erase the best solution; it only moves the current search point.
         if self._best_state is None:
             return
 
@@ -954,6 +1040,9 @@ class ASAOptimizer(Optimizer):
         """
         Extract parameter names, bounds and YAML initial values from GOW.
         """
+        # This method reads parameter information from the GOW ProblemConfig.
+        # It stores parameter names, parameter types, bounds, and YAML initial values.
+        # It rejects categorical parameters because ASA needs numeric distances and numeric steps.
         self._direction = self._get_direction(problem)
 
         params = problem.optimizable_parameters()
@@ -1024,6 +1113,8 @@ class ASAOptimizer(Optimizer):
         """
         Initialize ASA temperatures, counters and diagnostics.
         """
+        # This method initializes temperatures, counters, sigmas, and sensitivity accumulators.
+        # It runs after parameter names are known because many dictionaries are keyed by parameter name.
         self.cost_temperature = self.initial_temperature
         self.temperature = self.cost_temperature
         self.cost_annealing_index = 0
@@ -1082,6 +1173,9 @@ class ASAOptimizer(Optimizer):
 
         This follows the same convention used by DifferentialEvolutionOptimizer.
         """
+        # This method converts evaluator output into ASA's internal score convention.
+        # Inside ASA, higher score is always better. For minimization problems, the sign is inverted.
+        # Invalid or missing evaluator results become -infinity, which ASA rejects.
         if isinstance(fitness_value, (int, float)):
             x = float(fitness_value)
             if not math.isfinite(x):
@@ -1152,6 +1246,7 @@ class ASAOptimizer(Optimizer):
         """
         Convert real parameter candidate to normalized [0, 1].
         """
+        # This helper converts a candidate from real units into normalized [0, 1] values.
         return {
             name: self._normalize_value(name, float(candidate[name]))
             for name in self._param_names
@@ -1161,6 +1256,8 @@ class ASAOptimizer(Optimizer):
         """
         Convert normalized [0, 1] candidate to real parameter space.
         """
+        # This helper converts normalized [0, 1] values back to real parameter values.
+        # Integer parameters are rounded and clipped before being returned.
         candidate: Dict[str, Any] = {}
 
         for name in self._param_names:
@@ -1179,6 +1276,7 @@ class ASAOptimizer(Optimizer):
         """
         Normalize one real value to [0, 1].
         """
+        # Normalize one value using that parameter's lower and upper bounds.
         _, (lo, hi) = self._param_specs[name]
         return self._clip01((value - lo) / (hi - lo))
 
@@ -1186,6 +1284,7 @@ class ASAOptimizer(Optimizer):
         """
         Denormalize one [0, 1] value to real bounds.
         """
+        # Denormalize one value from [0, 1] back into the parameter's real bounds.
         _, (lo, hi) = self._param_specs[name]
         value = self._clip01(value)
         return lo + value * (hi - lo)
@@ -1195,18 +1294,21 @@ class ASAOptimizer(Optimizer):
         """
         Clip value to [low, high].
         """
+        # Clip means force a number to remain inside a valid interval.
         return min(high, max(low, value))
 
     def _clip01(self, value: float) -> float:
         """
         Clip value to [0, 1].
         """
+        # Special clipping helper for normalized values, where the valid interval is [0, 1].
         return self._clip_value(value, 0.0, 1.0)
 
     def _copy_state(self, state: _State) -> _State:
         """
         Deep-ish copy of a state.
         """
+        # This helper copies a state so later edits do not accidentally change stored history.
         return _State(
             values=dict(state.values),
             normalized=dict(state.normalized),
@@ -1219,6 +1321,7 @@ class ASAOptimizer(Optimizer):
         """
         Stable key used to recover proposal metadata in tell().
         """
+        # This helper creates a stable key used to recover metadata for a candidate.
         return tuple(
             (name, round(float(candidate[name]), 15))
             for name in sorted(self._param_names)
@@ -1228,12 +1331,14 @@ class ASAOptimizer(Optimizer):
         """
         Recover metadata generated in ask().
         """
+        # This helper retrieves metadata saved during ask() for a candidate returned through tell().
         return dict(self._pending_metadata_by_key.get(self._candidate_key(candidate), {}))
 
     def _record_param_attempts(self, proposed: _State) -> None:
         """
         Record which parameters were changed in a proposal.
         """
+        # This method counts which parameters were attempted in a proposed mutation.
         if proposed.metadata is None:
             return
 
@@ -1247,6 +1352,7 @@ class ASAOptimizer(Optimizer):
         """
         Record accepted mutations per parameter.
         """
+        # This method counts which mutated parameters were accepted.
         if proposed.metadata is None:
             return
 
@@ -1265,6 +1371,8 @@ class ASAOptimizer(Optimizer):
         """
         Record approximate per-parameter sensitivity from accepted moves.
         """
+        # This method estimates sensitivity from accepted moves.
+        # The approximation is: sensitivity = absolute cost change / absolute normalized step.
         if proposed.metadata is None:
             return
 
@@ -1297,6 +1405,7 @@ class ASAOptimizer(Optimizer):
 
     @staticmethod
     def _get_direction(problem: ProblemConfig) -> str:
+        # This helper reads whether the objective should be minimized or maximized.
         direction = "maximize"
 
         obj = getattr(problem, "objective", None)
@@ -1321,6 +1430,8 @@ class ASAOptimizer(Optimizer):
         """
         Validate configuration values early.
         """
+        # This method checks all user-facing configuration values.
+        # It raises clear errors for impossible or unsafe settings before optimization begins.
         if self.max_iterations <= 0:
             raise ValueError("max_iterations must be > 0")
 
@@ -1411,5 +1522,6 @@ class ASAOptimizer(Optimizer):
             raise ValueError("sensitivity_floor must be > 0")
 
 
+# Keep the earlier experimental class name available for old imports.
 # Backward compatibility with earlier experimental file/class name.
 AdaptiveSimulatedAnnealingOptimizer = ASAOptimizer

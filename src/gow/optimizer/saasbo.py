@@ -185,10 +185,12 @@ class SAASBOOptimizer(Optimizer):
 
         train_x = torch.tensor(self._train_x, dtype=dtype, device=device)
         train_y = torch.tensor(self._train_y, dtype=dtype, device=device).unsqueeze(-1)
+        train_yvar = torch.full_like(train_y, 1e-6)
 
         model = SaasFullyBayesianSingleTaskGP(
             train_X=train_x,
             train_Y=train_y,
+            train_Yvar=train_yvar,
             outcome_transform=Standardize(m=1),
         )
 
