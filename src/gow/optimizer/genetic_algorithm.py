@@ -185,7 +185,9 @@ class GeneticAlgorithmOptimizer(Optimizer):
             Fraction of the best population copied directly into the next
             generation.
 
-            This protects good solutions from being lost.
+            This protects good solutions from being lost. Because this
+            implementation uses max(1, ...), at least one elite individual is
+            preserved even when elite_fraction is configured as 0.
 
         selection:
             Parent selection strategy.
@@ -199,11 +201,14 @@ class GeneticAlgorithmOptimizer(Optimizer):
             Number of individuals compared during tournament selection.
 
             A larger tournament increases selection pressure because good
-            individuals have a higher chance of being selected.
+            individuals have a higher chance of being selected. The configured
+            value must not be larger than the population size because Python's
+            random.sample() selects tournament members without repetition.
 
         seed:
-            Optional random seed. It makes the same run reproducible by
-            generating the same sequence of random choices.
+            Optional random seed. It makes the GA's internal random choices
+            reproducible when the problem definition, evaluator behavior,
+            candidate order, and remaining execution conditions are unchanged.
 
         kwargs:
             Extra configuration values that may be passed by GOW.
@@ -370,13 +375,13 @@ class GeneticAlgorithmOptimizer(Optimizer):
           1. Read n, the batch size requested by GOW.
           2. Set the internal population_size equal to that batch size.
           3. If the population does not exist yet, create it with _initialize().
-          3. If this is generation 0, return the initial random population.
-          4. Otherwise, create a new population.
-          5. Copy the best individuals directly into the new population
+          4. If this is generation 0, return the initial random population.
+          5. Otherwise, create a new population.
+          6. Copy the best individuals directly into the new population
              using elitism.
-          6. Fill the remaining positions using selection, crossover, and
+          7. Fill the remaining positions using selection, crossover, and
              mutation.
-          7. Return the new population as the candidate list.
+          8. Return the new population as the candidate list.
         """
 
         # GOW passes n because all optimizers share the same ask(problem, n)
@@ -410,6 +415,8 @@ class GeneticAlgorithmOptimizer(Optimizer):
         # directly to the next generation.
         #
         # max(1, ...) guarantees that at least one elite individual survives.
+        # Consequently, elite_fraction = 0 still preserves one elite; this
+        # implementation does not provide a completely elitism-free mode.
         elite_count = max(1, int(self.population_size * self.elite_fraction))
 
         # Sort the current population from best to worst.
@@ -426,6 +433,10 @@ class GeneticAlgorithmOptimizer(Optimizer):
         )
 
         # Copy only the individual dictionary from each elite pair.
+        #
+        # ranked[:elite_count] keeps only the first elite_count pairs.
+        # The expression inside brackets builds a new list. For each pair x,
+        # x[0] is the individual and dict(x[0]) creates an independent copy.
         elites = [dict(x[0]) for x in ranked[:elite_count]]
 
         # Add elite individuals to the new population before creating children.
@@ -524,6 +535,10 @@ class GeneticAlgorithmOptimizer(Optimizer):
           - candidates[1] corresponds to fitness[1]
           - etc.
 
+        This method relies on GOW to preserve that order and to provide one
+        result per candidate. It does not independently verify the lengths or
+        compare the received candidates with the current population.
+
         In this implementation, tell() extracts one numeric value from each
         fitness dictionary and stores it in self._fitness. Those values will be
         used by ask() to create the next generation.
@@ -549,6 +564,12 @@ class GeneticAlgorithmOptimizer(Optimizer):
 
             # If no known key is found, keep the original implementation
             # behavior and assign -inf.
+            #
+            # Important: this optimizer treats lower values as better, so -inf
+            # will be interpreted as the best possible score. This fallback can
+            # therefore make a result with an unexpected format dominate parent
+            # selection. The comment documents the existing behavior; the code
+            # is intentionally left unchanged here.
             else:
                 scores.append(float("-inf"))
 
@@ -720,6 +741,8 @@ class GeneticAlgorithmOptimizer(Optimizer):
         """
 
         # Randomly choose tournament_size positions from the population.
+        # random.sample() chooses distinct positions, so tournament_size cannot
+        # be larger than the number of individuals in the population.
         #
         # Example:
         #   if the population has 100 individuals and tournament_size = 3,
@@ -731,7 +754,10 @@ class GeneticAlgorithmOptimizer(Optimizer):
 
         # Select the best index among the sampled individuals.
         #
-        # In this implementation, lower fitness is better, so min() is used.
+        # min(..., key=...) returns the sampled index whose associated fitness
+        # is smallest. The short lambda expression means: for each index i,
+        # compare self._fitness[i]. Because lower fitness is better, min() is
+        # used rather than max().
         best_idx = min(idxs, key=lambda i: self._fitness[i])
 
         # Return a copy of the selected individual.

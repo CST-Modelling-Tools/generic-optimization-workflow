@@ -1,178 +1,113 @@
 # CMA-ES in GOW
 
-## CMA-ES Guide in GOW
-
-**Optimizer behavior and YAML configuration**
-
-**Document objective.** Explain how the CMA-ES optimizer works inside GOW and how to configure the YAML file. This guide focuses on the method, the communication with GOW, and the parameters actually used by this implementation.
+**Optimizer Usage and YAML Configuration Guide**
 
 ## Contents
 
-1. [What problem CMA-ES solves](#1-what-problem-cma-es-solves)
-2. [How CMA-ES communicates with GOW](#2-how-cma-es-communicates-with-gow)
-3. [Population, generations, and evaluation budget](#3-population-generations-and-evaluation-budget)
-4. [How CMA-ES interprets YAML parameters](#4-how-cma-es-interprets-yaml-parameters)
-5. [What CMA-ES learns during the search](#5-what-cma-es-learns-during-the-search)
-6. [How CMA-ES generates new candidates](#6-how-cma-es-generates-new-candidates)
-7. [How evaluation results are interpreted](#7-how-evaluation-results-are-interpreted)
-8. [How to configure the YAML in GOW](#8-how-to-configure-the-yaml-in-gow)
-9. [CMA-ES-specific parameters in `settings`](#9-cma-es-specific-parameters-in-settings)
-10. [Practical recommendations](#10-practical-recommendations)
-11. [Appendix A. Conceptually commented base YAML](#appendix-a-conceptually-commented-base-yaml)
-12. [Appendix B. Quick reading of the `ask`/`tell` flow](#appendix-b-quick-reading-of-the-asktell-flow)
+1. What CMA-ES is
+2. Core idea of the algorithm: a distribution that learns
+3. From the idea to the algorithm: how CMA-ES works within GOW
+4. When it makes sense to use CMA-ES
+5. How to control a CMA-ES run in GOW
+6. How to configure the YAML
+   1. `objective` block
+   2. `parameters` block
+   3. `evaluator` block
+   4. `optimizer` block
+7. Configurable CMA-ES parameters
+8. Practical recommendations
+9. Commented base YAML
+10. Quick overview of the CMA-ES-GOW flow
+11. Final summary
 
----
+## 1. What CMA-ES is
 
-## 1. What problem CMA-ES solves
+CMA-ES stands for Covariance Matrix Adaptation Evolution Strategy. It is a stochastic evolutionary strategy for numerical optimization, especially useful when several real-valued parameters must be adjusted and derivatives of the objective function are not available.
 
-CMA-ES means **Covariance Matrix Adaptation Evolution Strategy**. It is a stochastic evolutionary strategy for numerical optimization. It is especially useful when the problem is continuous, nonlinear, non-convex, or when the parameters may be related to each other.
+Instead of testing unrelated points, CMA-ES maintains a search distribution. In each generation, it produces a population of candidates, observes which candidates obtain the best results, and adapts the distribution to guide subsequent generations toward more promising regions.
 
-The central idea is to maintain a search distribution. In each generation, CMA-ES generates a batch of candidates around a central point. After evaluating those candidates, it shifts the search toward the best regions and adjusts the shape of the distribution so that it becomes more likely to generate candidates similar to those that performed well.
+This ability to learn relationships between parameters makes CMA-ES especially useful for nonlinear, nonconvex, poorly scaled problems or problems in which variables influence one another.
 
-In the classical formulation, the search distribution can be described intuitively with three elements: the mean, the global scale `sigma`, and the covariance matrix. The mean indicates the center of the search, `sigma` controls the general amplitude of the movements, and the covariance matrix learns search directions and relationships between parameters.
+## 2. Core idea of the algorithm: a distribution that learns
+
+The central idea of CMA-ES is to search using a multivariate normal distribution that changes during the run. Conceptually, this distribution is described by three elements:
+
+- The mean indicates the current center of the search.
+- Sigma controls the overall scale of the movements around that center.
+- The covariance matrix adjusts the shape and orientation of the search, allowing the optimizer to learn directions and relationships between parameters.
+
+At the beginning, the distribution is built around the `value` entries defined in the YAML. After evaluating a population, the best candidates influence the new center and the shape of the distribution. In this way, CMA-ES can expand, reduce, or redirect exploration according to the information obtained during the run.
 
 > **Key idea**
->
-> CMA-ES learns a multivariate distribution. If several parameters improve together, it can orient the search toward coordinated movements.
+> CMA-ES does not only learn where it should search. It also learns what search scale to use and in which directions it is useful to move several parameters together.
 
----
+## 3. From the idea to the algorithm: how CMA-ES works within GOW
 
-## 2. How CMA-ES communicates with GOW
+Within GOW, CMA-ES is integrated through a generation-based cycle. The optimizer proposes a complete population, GOW evaluates each candidate using the external program, and then returns the results so that CMA-ES can update its search distribution.
 
-The communication between GOW and the optimizer happens through the `ask`/`tell` flow. This flow separates candidate generation from the external evaluation.
+1. GOW requests a batch of candidates according to `batch_size`.
+2. CMA-ES generates that population around its current distribution.
+3. GOW sends each candidate to the external evaluator.
+4. The evaluator returns an objective value for each candidate.
+5. GOW delivers the results to CMA-ES.
+6. CMA-ES updates the mean, sigma, and covariance before generating the next population.
 
-1. GOW calls `ask()` and requests a batch of candidates.
-2. CMA-ES returns candidates as real values, inside the `bounds` defined in the YAML.
-3. GOW runs the external evaluator for each candidate.
-4. GOW calls `tell()` and gives the results back to the optimizer.
-5. CMA-ES uses those results to adjust its search and advance one generation.
-
----
-
-## 3. Population, generations, and evaluation budget
-
-A generation corresponds to a complete batch of candidates generated by `ask()` and later processed by `tell()`.
+In this integration, a generation is considered complete only after the results of the entire population have been received. Therefore, `batch_size` also acts internally as the population size and must remain constant throughout the run.
 
 ```text
 ask()  -> CMA-ES proposes batch_size candidates
-GOW    -> evaluates all candidates with the external evaluator
-tell() -> CMA-ES receives the results, updates the search, and adds one generation
+GOW    -> evaluates the complete population
+tell() -> CMA-ES receives the results and updates the search
 ```
 
-In this implementation, `batch_size` defines how many candidates are generated per generation. Internally, that quantity works as the CMA-ES population size. For this reason, `population_size` is not configured separately in the YAML.
+## 4. When it makes sense to use CMA-ES
 
-`max_generations` defines how many internal generations the optimizer can run before stopping by this criterion.
+CMA-ES makes sense when the problem is mainly composed of numerical parameters with defined `bounds`, and the goal is to find a combination that minimizes or maximizes an objective function calculated by an external evaluator.
+
+It is usually a good option when:
+
+- the variables are real-valued or can reasonably be treated as numerical;
+- the objective function is nonlinear, nonconvex, or does not provide derivatives;
+- relationships may exist between parameters and learning coordinated movements is useful;
+- there is enough evaluation budget to assess several populations.
+
+It is not usually the best choice when the problem is mainly categorical or combinatorial. This implementation supports `real` and `int` parameters, but it does not support optimizable categorical parameters. Integer values are generated from a continuous space and then rounded, so CMA-ES remains essentially a continuous method.
+
+> **Question CMA-ES answers**
+> Which combination of numerical values within these ranges produces the best result, and which directions in the search space should be explored more intensively?
+
+## 5. How to control a CMA-ES run in GOW
+
+The run is controlled through three related values: `max_evaluations`, `batch_size`, and `max_generations`.
+
+- `max_evaluations` is the maximum evaluation budget allowed by GOW.
+- `batch_size` is the number of candidates evaluated in each generation. In this implementation, it also defines the internal CMA-ES population size.
+- `max_generations` is the maximum number of complete generations allowed by the optimizer.
 
 ```text
-approximate evaluations = batch_size x max_generations
+evaluations associated with the generation limit = batch_size x max_generations
 ```
 
-For example, if `batch_size` is `16` and `max_generations` is `100`, CMA-ES can use approximately `1600` evaluations, unless GOW stops the execution earlier because of `max_evaluations` or another external criterion.
+For example, with `batch_size: 16` and `max_generations: 100`, the optimizer limit corresponds to 1,600 evaluations. To make both controls coincide, `max_evaluations: 1600` can be configured.
 
-### CMA-ES and batch mode
+The run may end earlier if GOW reaches `max_evaluations` or if the internal CMA-ES library activates one of its stopping criteria. If `max_evaluations` is greater than `batch_size x max_generations`, CMA-ES will stop because of the generation limit before consuming the entire GOW budget.
 
-The candidates from the same generation are generated before their results are known. The distribution is only updated when `tell()` receives the evaluation of the entire batch. This fits well with batch execution and parallel evaluations.
+`batch_size` must be at least 2 and must remain constant. It is also advisable for `max_evaluations` to be a multiple of `batch_size` so that the optimizer always works with complete populations.
 
----
+## 6. How to configure the YAML
 
-## 4. How CMA-ES interprets YAML parameters
+The YAML must describe the objective, the optimizable parameters, the external evaluator, and the optimizer configuration. For CMA-ES, the main blocks are `objective`, `parameters`, `evaluator`, and `optimizer`.
 
-CMA-ES takes the optimizable parameters defined in the YAML from their names, types, initial values, and `bounds`. The `bounds` define the allowed search space. The `value` fields are used to build the initial point of the distribution.
-
-Although the parameters may have very different real scales, this implementation works internally in a normalized space between `0` and `1`. This means that each parameter is transformed from its real range into a common internal coordinate.
-
-For example, if a real parameter has `bounds: [10, 20]` and `value: 15`, it is internally represented as `0.5`. If another parameter has `bounds: [0.001, 0.002]`, it can also be represented on the same internal scale. This helps `sigma0` have a common interpretation for all parameters.
-
-Real parameters are returned as continuous values. Integer parameters are generated internally as continuous values, then denormalized and rounded to the nearest allowed integer. Categorical parameters are not directly supported because CMA-ES needs to operate with numerical vectors.
-
-> **Important**
->
-> The `value` fields in the YAML build the initial point of CMA-ES. This does not mean that the exact candidate written in the YAML is automatically evaluated as the first candidate.
-
----
-
-## 5. What CMA-ES learns during the search
-
-CMA-ES does not test candidates completely at random in every generation. As the optimization advances, the method learns which regions of the search space seem more promising.
-
-At the beginning, CMA-ES starts from an initial solution and generates a group of candidates around it. After evaluating those candidates, it observes which ones obtained better results and uses that information to adjust how the next batch is generated.
-
-Intuitively, CMA-ES keeps track of three important things:
-
-- Where the best candidates are appearing.
-- How wide the exploration around that region should be.
-- In which directions it is convenient to explore more or less.
-
-For this reason, generation after generation, the search does not remain the same. If CMA-ES finds a promising region, it can concentrate more around it. If it needs to explore more, it can widen the exploration. This adaptation is one of the main characteristics of CMA-ES.
-
----
-
-## 6. How CMA-ES generates new candidates
-
-CMA-ES generates candidates from a search distribution. In this implementation, the parameters are handled internally in a normalized space between `0` and `1`. GOW and the evaluator always receive the real values defined by the `bounds` in the YAML.
-
-At the beginning, the `value` fields in the YAML are used to build the starting point of CMA-ES. This means that the optimizer starts searching around those initial values. However, this does not imply that the exact candidate written in the YAML is automatically evaluated as the first candidate.
-
-In each generation, CMA-ES generates a complete batch of candidates. In GOW, the size of that batch is defined with `batch_size` inside the `optimizer` block.
-
-For example:
-
-```yaml
-optimizer:
-  name: cmaes
-  seed: 42
-  max_evaluations: 160
-  batch_size: 16
-  settings:
-    sigma0: 0.05
-    max_generations: 10
-```
-
-In this case, CMA-ES generates `16` candidates per generation. Internally, that `batch_size` works as the CMA-ES population size. For this reason, `population_size` must not be configured separately.
-
-GOW evaluates all candidates in the batch and then returns the results to the optimizer. With those results, CMA-ES adjusts how it searches for the next generation. If certain regions produce better results, the search is progressively oriented toward those regions.
-
-> **Key idea**
->
-> CMA-ES does not generate isolated candidates one by one. It generates a complete batch of candidates, waits for the results of that batch, and then updates its search for the next generation.
-
----
-
-## 7. How evaluation results are interpreted
-
-GOW can work with minimization or maximization problems. For this reason, CMA-ES compares candidates according to the direction defined in the YAML.
-
-If the objective is configured as minimization, the best candidate is the one with the lowest objective value. If it is configured as maximization, the best candidate is the one with the highest objective value.
-
-For example, when the goal is to reduce an error, the objective direction must be configured as:
+### 6.1 `objective` block
 
 ```yaml
 objective:
   direction: minimize
 ```
 
-In that case, CMA-ES interprets candidates that reduce the error value as better candidates.
+`direction` indicates whether the objective value must be minimized or maximized. For error, cost, or loss problems, `minimize` is normally used. When the goal is to increase a performance metric, `maximize` is used. This direction should be defined explicitly.
 
-During the execution, each evaluated candidate must return a valid result. If an evaluation fails, that candidate is not used to update the search. This prevents CMA-ES from learning from incomplete or incorrect results.
-
-In the result summary, it is useful to review mainly `best_objective`, `best_candidate`, and `generation`. `best_objective` indicates the best value found so far; `best_candidate` shows the parameter values that produced that result; `generation` indicates how many complete generations have been processed.
-
----
-
-## 8. How to configure the YAML in GOW
-
-The YAML must describe the problem, the optimizable parameters, the external evaluator, and the optimizer configuration. For CMA-ES, the most important blocks are `objective`, `parameters`, `evaluator`, and `optimizer`.
-
-### 8.1 `objective` block
-
-```yaml
-objective:
-  direction: minimize
-```
-
-This block indicates whether the objective must be minimized or maximized. In error, cost, or distance problems, `minimize` is normally used. In problems where the goal is to increase a metric, `maximize` is used.
-
-### 8.2 `parameters` block
+### 6.2 `parameters` block
 
 ```yaml
 parameters:
@@ -186,210 +121,134 @@ parameters:
     bounds: [5.0, 15.0]
 ```
 
-Each optimizable parameter must have a type, an initial value, and `bounds`. CMA-ES uses the `bounds` to represent each parameter internally in the normalized range `[0, 1]` and to return candidates inside the allowed range.
+Each optimizable parameter must have `type`, `value`, and `bounds`.
 
-| Field | Interpretation |
-|---|---|
-| `type` | Parameter type. This implementation supports `real` and `int`. Categorical parameters are not directly supported. |
-| `value` | Initial value from the YAML. It is used to build the initial point of CMA-ES. |
-| `bounds` | Allowed range where CMA-ES can search. It must have a lower and an upper limit. |
+- `type` indicates the parameter type. This implementation supports `real` and `int`.
+- `value` is used to build the initial mean of the CMA-ES distribution.
+- `bounds` defines the allowed interval in which the optimizer can search.
 
-For integer parameters, the optimizer works internally in continuous space and then rounds the value. For this reason, although integers can be used, CMA-ES is still essentially a continuous method.
+The implementation converts each parameter into a normalized coordinate between 0 and 1. This allows parameters with very different real-world scales to be handled internally on a common scale. Candidates are converted back to their real values before being sent to the evaluator.
 
-### 8.3 `evaluator` block
+Integer parameters are generated internally as continuous values, converted to their real range, and rounded to the nearest permitted integer. Categorical parameters are not directly supported.
+
+> **Important**
+> The `value` entries build the initial mean of CMA-ES. The exact candidate written in the YAML is not automatically evaluated as the first candidate.
+
+### 6.3 `evaluator` block
 
 ```yaml
 evaluator:
-  command:
-    ["/path/to/evaluator"]
+  command: ["/path/to/evaluator"]
   timeout_s: 600
 ```
 
-This block indicates which external program will evaluate each candidate. CMA-ES does not calculate the objective function; the evaluator calculates it and GOW returns the result to the optimizer.
+This block specifies which external program evaluates each candidate. CMA-ES does not calculate the objective function itself. GOW runs the evaluator and returns the result to the optimizer.
 
-### 8.4 `optimizer` block: general GOW parameters
-
-The `optimizer` block indicates which optimizer GOW will use and defines the general execution parameters. These fields are not exclusive to CMA-ES: they also appear when configuring other optimizers inside GOW.
-
-The general GOW parameters must be written directly inside `optimizer`, at the same indentation level. The CMA-ES-specific parameters remain inside `settings`.
+### 6.4 `optimizer` block
 
 ```yaml
 optimizer:
   name: cmaes
-  seed:
-  max_evaluations:
-  batch_size:
+  seed: 123
+  max_evaluations: 1600
+  batch_size: 16
   settings:
-    sigma0:
-    max_generations:
+    sigma0: 0.05
+    max_generations: 100
 ```
 
-#### `name`
+The general execution parameters are placed directly inside `optimizer`. CMA-ES-specific hyperparameters are placed inside `settings`.
 
-Selects the optimizer to use. For this CMA-ES implementation, use:
+`population_size` must not be added to the YAML. In this implementation, the population size is obtained directly from `batch_size` to avoid having two different configurations for the same quantity.
 
-```yaml
-name: cmaes
-```
+## 7. Configurable CMA-ES parameters
 
-#### `seed`
+The following table includes only the parameters exposed by this integration and required to configure the run.
 
-Defines the random seed of the execution. Using the same seed allows an execution to be repeated under equivalent conditions.
+| Parameter | YAML location | What it controls | Usage guidance |
+|---|---|---|---|
+| `name` | `optimizer` | Selects the optimizer. | Use `cmaes` for this implementation. |
+| `seed` | `optimizer` | Fixes the pseudorandom sequence. | Use an integer when reproducibility is required. Keep the YAML, environment, and evaluation order unchanged as well. |
+| `max_evaluations` | `optimizer` | Defines the maximum budget allowed by GOW. | Choose it according to the evaluator cost. It should preferably be a multiple of `batch_size`. |
+| `batch_size` | `optimizer` | Defines the number of candidates per generation and the internal population size. | It must be `>= 2` and remain constant throughout the run. Do not configure `population_size` separately. |
+| `sigma0` | `settings` | Defines the initial distribution scale in the normalized `[0, 1]` space. | It must be `> 0`. The default value is `0.05`. Increasing it broadens the initial search; reducing it makes the search more local. |
+| `max_generations` | `settings` | Limits the number of complete generations. | It must be `>= 1`. The default value is `100`. Adjust it consistently with `batch_size` and `max_evaluations`. |
 
-#### `max_evaluations`
+The internal adaptation of the mean, sigma, covariance, and evolution paths is managed by the `cma` library. These details are not configured in the YAML for this implementation.
 
-Defines the maximum number of evaluations that GOW will allow during the optimization.
+## 8. Practical recommendations
 
-In CMA-ES, it should be configured coherently with `batch_size` and `max_generations`, because one generation corresponds to evaluating a complete batch of candidates.
+### 8.1 Align the budget with the generations
 
-```text
-max_evaluations = batch_size x max_generations
-```
+Before running the optimization, calculate `batch_size x max_generations`. To make GOW and CMA-ES stop at approximately the same point, configure `max_evaluations` with that result. Avoid budgets that leave an incomplete population.
 
-#### `batch_size`
+### 8.2 Choose `sigma0` according to confidence in the initial point
 
-`batch_size` defines the number of candidates that GOW requests per batch. In CMA-ES, that batch corresponds to the population generated in each generation. For this reason, in this implementation, `batch_size` also defines the CMA-ES population size internally.
+`sigma0` is interpreted in the normalized `[0, 1]` space. A value of `0.05` represents a small initial scale relative to the complete range. A value of `1.0` corresponds to the full normalized scale, but it does not mean that every candidate will move exactly across the entire range.
 
-If it is increased, CMA-ES tests more candidates in each generation. This can improve search diversity and help explore the parameter space better, but it consumes more evaluations per generation.
+When the `value` entries represent a good reference, it usually makes sense to begin with a more local search. When they are only a technical starting point, increasing `sigma0` may be useful to explore farther away.
 
-If it is reduced, each generation is cheaper, but CMA-ES receives less information in each update and may explore fewer regions at the same time.
+### 8.3 Define useful `bounds` with positive width
 
----
+CMA-ES can search only within the defined `bounds`. Bounds that are too narrow may prevent improvements, while excessively wide bounds may require many more evaluations. Each optimizable parameter must have a lower bound that is smaller than its upper bound for normalization to be valid.
 
-## 9. CMA-ES-specific parameters in `settings`
+### 8.4 Use `seed` when reproducibility is required
 
-The `settings` block contains the hyperparameters that modify the CMA-ES-specific behavior in this implementation. There are only a few because the fine adaptation of the mean, `sigma`, covariance, and evolution paths is delegated to the `cma` library.
+The seed helps reproduce the candidate sequence. To compare runs, the `bounds`, `batch_size`, `max_generations`, evaluator, and environment conditions must also remain unchanged.
 
-```yaml
-settings:
-  sigma0: 0.05
-  max_generations: 100
-```
+### 8.5 Ensure valid evaluator results
 
-In this implementation, `population_size` is not written inside `settings`. The population size is defined by `batch_size` at the main level of `optimizer`.
+Each candidate must return a finite numerical objective value. When an evaluation fails, the result is missing, or a non-numerical value appears, this implementation penalizes it with a very large loss so that CMA-ES treats it as a very poor solution. This penalty should not be relied on as normal behavior.
 
-### 9.1 `sigma0`
+### 8.6 Evaluate an exact reference separately when necessary
 
-`sigma0` defines the initial amplitude with which CMA-ES starts generating candidates around the initial point.
+The YAML `value` entries define the initial center of the distribution, but they do not guarantee that this exact combination will be evaluated. When a comparison with a specific reference is required, evaluate it explicitly through the GOW evaluation workflow.
 
-In this implementation, CMA-ES works internally in a normalized space between `0` and `1`. Therefore, `sigma0` is interpreted as a scale relative to the normalized range of each parameter.
+## 9. Commented base YAML
 
-For example:
-
-```yaml
-sigma0: 0.05
-```
-
-means that CMA-ES starts exploring around the initial point with an approximate scale of `5%` of the normalized range.
-
-In the same logic, a value of:
-
-```yaml
-sigma0: 1.0
-```
-
-represents a scale equivalent to `100%` of the normalized range. That is, the initial search amplitude is as large as the entire normalized interval `[0, 1]`.
-
-However, this does not mean that each candidate will move exactly `100%` of the range. CMA-ES generates candidates probabilistically, so `sigma0` does not define an exact displacement. It defines the initial amplitude of the search distribution.
-
-If `sigma0` is increased, CMA-ES starts exploring farther away from the `value` fields defined in the YAML. This can be useful when those initial values are only an approximate reference.
-
-If `sigma0` is reduced, CMA-ES starts more locally around the YAML `value` fields. This can be useful when the initial values represent a good reference solution or when the `bounds` are already narrow.
-
-Although `1.0` can be understood as the full normalized scale, in practice it is usually a very high starting value, because it can generate many candidates close to the range limits.
-
-- Accepted range: greater than `0`.
-- Practical initial range: `0.02` to `0.20`.
-- Default value: `0.05`.
-- Recommended starting value: `0.05`.
-
-> **Key idea**
->
-> `sigma0` controls how wide the initial exploration is. A value of `1.0` represents the full normalized scale, but it should not be confused with an exact movement of each candidate.
-
-### 9.2 `max_generations`
-
-`max_generations` defines how many internal generations CMA-ES can run before stopping by this criterion. One generation is equivalent to one `ask()` call followed by one `tell()` call with a complete evaluated batch.
-
-- Accepted range: greater than or equal to `1`.
-- Default value: `100`.
-- Recommended starting value: `100`, adjusted according to the total evaluation budget.
-
-The approximate associated budget is calculated as `batch_size x max_generations`. If `max_evaluations` is also defined in GOW, both limits should be coherent to avoid unexpected stops.
-
----
-
-## 10. Practical recommendations
-
-### 10.1 Calculate the budget before running
-
-To interpret the results correctly, it is useful to calculate how many evaluations CMA-ES can use.
-
-```text
-recommended max_evaluations ~= batch_size x max_generations
-```
-
-For example, `batch_size: 16` and `max_generations: 100` are equivalent to about `1600` evaluations. If the goal is to run `10000` evaluations, `max_generations` or `batch_size` can be adjusted coherently.
-
-### 10.2 Choose `sigma0` according to confidence in the initial `value`
-
-If the YAML `value` fields represent a good reference solution, such as an already validated base configuration, it is convenient to start with a moderate or small `sigma0`. If the `value` fields are only a technical starting point, a wider `sigma0` can be used.
-
-### 10.3 Keep `bounds` coherent
-
-CMA-ES can only search inside the `bounds` defined in the YAML. Bounds that are too narrow can prevent improvements from being found. Bounds that are too wide can require more evaluations, because the normalized space represents a much larger real region.
-
----
-
-## Appendix A. Conceptually commented base YAML
+This example shows a generic and consistent configuration for a continuous problem. It must be adapted to the evaluator and the actual parameters of the problem.
 
 ```yaml
 id: continuous-problem-cmaes
 
 objective:
-  direction: minimize  # Change to maximize if the objective must increase.
+  direction: minimize          # Use maximize if the objective must increase.
 
 parameters:
   x0:
-    type: real          # CMA-ES supports real numerical parameters.
-    value: 0.5          # Initial point for this parameter.
-    bounds: [0.0, 1.0]  # Range where CMA-ES can search.
-
+    type: real                 # CMA-ES supports real and int parameters.
+    value: 0.5                 # Used to build the initial mean.
+    bounds: [0.0, 1.0]         # Allowed search interval.
   x1:
     type: real
     value: 10.0
     bounds: [5.0, 15.0]
 
 evaluator:
-  command:
-    ["/path/to/evaluator"]
-  timeout_s: 600        # Maximum time allowed for one evaluation.
+  command: ["/path/to/evaluator"]
+  timeout_s: 600               # Maximum time allowed for one evaluation.
 
 optimizer:
-  name: cmaes           # Selects the CMA-ES optimizer.
-  seed: 123             # Seed for reproducibility.
-  max_evaluations: 1600 # Total evaluation budget in GOW.
-  batch_size: 16        # Candidates per generation.
+  name: cmaes                  # Selects CMA-ES.
+  seed: 123                    # Seed for reproducibility.
+  max_evaluations: 1600        # Maximum budget managed by GOW.
+  batch_size: 16               # Candidates per generation and internal population size.
   settings:
-    sigma0: 0.05        # Initial scale in normalized space [0, 1].
-    max_generations: 100 # Maximum number of internal generations.
+    sigma0: 0.05               # Initial scale in the normalized space.
+    max_generations: 100       # Limit of complete generations.
 ```
 
----
+## 10. Quick overview of the CMA-ES-GOW flow
 
-## Appendix B. Quick reading of the `ask`/`tell` flow
+1. GOW reads the YAML and obtains the objective, parameters, evaluator, and CMA-ES configuration.
+2. GOW calls the optimizer and requests `batch_size` candidates.
+3. CMA-ES generates a complete population in the normalized space and converts it to the real values defined by the `bounds`.
+4. GOW sends each candidate to the external evaluator.
+5. The evaluator returns the objective value for each candidate.
+6. GOW delivers the population and its results to CMA-ES.
+7. CMA-ES updates the mean, sigma, and covariance, completing one generation.
+8. The process continues until `max_evaluations`, `max_generations`, or an internal stopping criterion is reached.
 
-### `ask(problem, n)`
+## 11. Final summary
 
-- GOW requests `n` candidates according to `batch_size`.
-- CMA-ES generates a complete batch of candidates.
-- Candidates are returned as real values inside the `bounds`.
-
-GOW evaluates the candidates with the external evaluator.
-
-### `tell(candidates, fitness)`
-
-- GOW returns the results of the evaluated batch.
-- CMA-ES compares the candidates according to the objective direction.
-- The search is updated using the information from the generation.
-- One generation is added and the next batch is prepared.
+CMA-ES optimizes numerical parameters through a search distribution that learns where to explore, at what scale, and in which directions. The YAML defines the objective, the `value` entries and `bounds`, the evaluator, the budget, `batch_size`, `sigma0`, and `max_generations`. GOW coordinates the external evaluations, while CMA-ES adapts the search using their results. In this implementation, `batch_size` also defines the internal population, and the `value` entries establish the initial mean rather than a candidate that is automatically evaluated.
