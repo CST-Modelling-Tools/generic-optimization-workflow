@@ -522,8 +522,6 @@ def evaluate_cmd(
     config_abs = config.expanduser().resolve()
     results_dir = _resolve_results_dir(config_abs, outdir)
 
-    archive_generations = _coerce_bool_option(archive_generations, False)
-    delete_archived_workdirs = _coerce_bool_option(delete_archived_workdirs, False)
 
     problem = load_problem_config(config_abs)
 
