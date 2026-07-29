@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from gow.candidate_ids import format_attempt_id, format_candidate_id, format_candidate_local_id
+from gow.checkpoint import CheckpointStore
 from gow.config import ProblemConfig
 from gow.evaluation import evaluate_candidate
 from gow.optimizer import make_optimizer
@@ -79,7 +80,9 @@ def run_local_optimization(
     run_root = runs_root / run_id_val
 
     outdir.mkdir(parents=True, exist_ok=True)
-    run_root.mkdir(parents=True, exist_ok=True)
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_store = CheckpointStore(run_root)
 
     run_results_path = run_root / "results.jsonl"
 
@@ -224,7 +227,38 @@ def run_local_optimization(
                 delete_source=delete_archived_workdirs,
             )
 
-        n_done += n_batch
+        n_done += n_batch
+
+        completed_generations = (
+            n_done + opt_cfg.batch_size - 1
+        ) // opt_cfg.batch_size
+
+        checkpoint_status = (
+            "completed"
+            if n_done >= opt_cfg.max_evaluations
+            else "running"
+        )
+
+        try:
+            optimizer_state = optimizer.state_dict()
+        except NotImplementedError:
+            optimizer_state = None
+
+        if optimizer_state is not None:
+            checkpoint_store.save(
+                manifest={
+                    "schema_version": 1,
+                    "run_id": run_id_val,
+                    "problem_id": problem.id,
+                    "status": checkpoint_status,
+                    "optimizer": str(opt_cfg.name),
+                    "evaluations_done": n_done,
+                    "completed_generations": completed_generations,
+                    "next_generation": completed_generations,
+                    "max_evaluations": opt_cfg.max_evaluations,
+                },
+                optimizer_state=optimizer_state,
+            )
 
     ok, actual = verify_run_results_complete(outdir, run_id_val, opt_cfg.max_evaluations)
     if not ok:
