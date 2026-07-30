@@ -1,3 +1,10 @@
+"""
+Global-best Particle Swarm Optimization with inertia weight, based on
+Kennedy and Eberhart (1995) for the original global-best formulation,
+and Shi and Eberhart (1998) for the inertia-weight modification.
+Adapted to the GOW ask()/tell() interface.
+"""
+
 from __future__ import annotations
 
 import math

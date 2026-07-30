@@ -1,3 +1,26 @@
+"""
+Active (mu/mu_w, lambda)-CMA-ES for continuous real-valued
+optimization, with weighted recombination, cumulative step-size adaptation,
+and rank-one/rank-mu covariance matrix updates.
+
+Based on:
+
+- Hansen, N. (2006).
+  The CMA Evolution Strategy: A Comparing Review.
+  In Towards a New Evolutionary Computation,
+  Studies in Fuzziness and Soft Computing, 192, 75-102.
+
+- Jastrebski, G. A. and Arnold, D. V. (2006).
+  Improving Evolution Strategies through Active Covariance Matrix
+  Adaptation.
+  IEEE Congress on Evolutionary Computation, 2814-2821.
+
+The internal algorithm is provided by pycma 4.4.4 through
+cma.CMAEvolutionStrategy.
+
+GOW adapts the algorithm to the ask()/tell() interface and performs
+the optimization in the normalized search domain [0, 1]^n.
+"""
 from __future__ import annotations
 
 import math
@@ -10,6 +33,8 @@ from .base import Optimizer
 
 
 class CMAESOptimizer(Optimizer):
+
+
     """
     CMA-ES optimizer adapted to GOW.
 
@@ -101,7 +126,7 @@ class CMAESOptimizer(Optimizer):
 
       3. _normalized_to_candidate(x)
            Converts each normalized vector from [0, 1]^n into a GOW candidate
-           with real or integer parameter values.
+           with continuous real parameter values.
 
       4. GOW evaluates the candidates outside this file.
            The optimizer does not compute the objective function directly.
@@ -139,11 +164,14 @@ class CMAESOptimizer(Optimizer):
         under optimizer.settings, because they belong to CMA-ES and not to the
         general GOW optimizer interface.
       - GOW must call ask(..., n=batch_size).
-      - Real and integer optimizable parameters are supported.
-      - Optimizable categorical parameters are not supported.
+      - Only continuous RealParam variables are supported, consistently with
+        the continuous CMA-ES formulation used by the cited literature.
+      - Integer and categorical optimizable parameters are rejected explicitly.
       - The internal score convention is: higher score is better.
       - The external `cma` package uses losses, where lower loss is better.
-      - Therefore, valid internal scores are converted to losses using -score.
+      - Fields named `loss` are always interpreted as lower-is-better.
+      - Other accepted objective fields follow problem.objective.direction.
+      - Valid internal scores are converted to pycma losses using -score.
       - Invalid evaluations receive a very large loss, so CMA-ES treats them as
         very bad candidates.
     """
@@ -384,9 +412,20 @@ class CMAESOptimizer(Optimizer):
         # fixed popsize.
         if n != self.population_size:
             raise ValueError(
-                "CMAESOptimizer requires ask(..., n=batch_size). "
+                "CMAESOptimizer requires a complete, fixed-size population "
+                "for every generation. Configure max_evaluations as a multiple "
+                "of batch_size. "
                 f"Got n={n}, batch_size={self.batch_size}, "
                 f"internal population_size={self.population_size}."
+            )
+
+        # A sampled population must be evaluated exactly once before a new
+        # population is requested. Otherwise the vectors required by tell()
+        # would be overwritten and the CMA-ES update would no longer correspond
+        # to the evaluated candidates.
+        if self._last_xs:
+            raise RuntimeError(
+                "ask() called before tell() for the previous CMA-ES population."
             )
 
         # First call to ask(): the external CMA-ES engine does not exist yet.
@@ -403,7 +442,7 @@ class CMAESOptimizer(Optimizer):
         # tell() must pass the same vectors back to self._es.tell().
         self._last_xs = [list(x) for x in xs]
 
-        # Convert normalized vectors into GOW candidates with real/int values.
+        # Convert normalized vectors into GOW candidates with real values.
         return [self._normalized_to_candidate(x) for x in self._last_xs]
 
     def tell(self, candidates: List[Dict[str, Any]], fitness: List[Dict[str, Any]]) -> None:
@@ -628,19 +667,19 @@ class CMAESOptimizer(Optimizer):
             # --------------------------------------------------------------
             # Integer-valued parameter
             # --------------------------------------------------------------
+            # The cited Active CMA-ES formulation operates in a continuous
+            # real-valued search space. This wrapper therefore rejects integer
+            # variables instead of introducing an undocumented rounding rule.
             elif isinstance(p, IntParam):
-                if not p.bounds or len(p.bounds) != 2:
-                    raise ValueError(f"Optimizable int param '{name}' missing bounds=[lo,hi]")
-                lo_i, hi_i = int(p.bounds[0]), int(p.bounds[1])
-                if lo_i > hi_i:
-                    raise ValueError(f"Int param '{name}' must have lo <= hi (got {lo_i}, {hi_i})")
-                self._param_names.append(name)
-                self._param_specs[name] = ("int", (float(lo_i), float(hi_i)))
+                raise ValueError(
+                    f"CMA-ES supports only continuous RealParam variables; "
+                    f"integer param '{name}' is not supported."
+                )
 
             # --------------------------------------------------------------
             # Optimizable categorical parameter
             # --------------------------------------------------------------
-            # CMA-ES works in a continuous numeric vector space.
+            # CMA-ES works in a continuous real-valued vector space.
             # Categories such as "red", "blue", or "green" do not have a
             # natural distance, covariance, or normalized coordinate here.
             elif isinstance(p, CategoricalParam):
@@ -676,6 +715,11 @@ class CMAESOptimizer(Optimizer):
             # Population size used by the CMA-ES engine.
             # This value comes from optimizer.batch_size in the GOW YAML.
             "popsize": self.population_size,
+
+            # Use the active covariance update described by Jastrebski and
+            # Arnold (2006). It is set explicitly to avoid depending on an
+            # implicit default of the external library.
+            "CMA_active": True,
 
             # Bounds in normalized space.
             # Every dimension is constrained to the interval [0, 1].
@@ -714,12 +758,11 @@ class CMAESOptimizer(Optimizer):
         Conversion for each dimension:
 
             1. Clip the normalized value to [0, 1].
-            2. Convert it to the real parameter range:
+            2. Convert it to the continuous real parameter range:
 
                    real_value = lo + value * (hi - lo)
 
-            3. If the parameter is integer, round the value.
-            4. Clip again to ensure the final value stays inside bounds.
+            3. Return the continuous real value.
         """
 
         # Candidate dictionary that will be returned to GOW.
@@ -728,7 +771,7 @@ class CMAESOptimizer(Optimizer):
         # Iterate over the normalized values and their parameter names.
         # zip() keeps the same order stored in self._param_names.
         for value, name in zip(x, self._param_names):
-            kind, (lo, hi) = self._param_specs[name]
+            _, (lo, hi) = self._param_specs[name]
 
             # Keep the normalized coordinate inside [0, 1].
             value = self._clip(float(value), 0.0, 1.0)
@@ -743,13 +786,6 @@ class CMAESOptimizer(Optimizer):
                 real_value = lo
             if abs(real_value - hi) < 1e-15:
                 real_value = hi
-
-            # Integer parameters are rounded after conversion to real space.
-            # They are clipped again because rounding could move a value just
-            # outside the allowed interval.
-            if kind == "int":
-                real_value = int(round(real_value))
-                real_value = int(self._clip(float(real_value), lo, hi))
 
             # Store the converted value under the original parameter name.
             cand[name] = real_value
@@ -828,15 +864,15 @@ class CMAESOptimizer(Optimizer):
             self._n_non_finite += 1
             return float("-inf")
 
-        # A loss is already a minimization quantity.
-        # Convert it to the internal score convention: higher is better.
+        # A field explicitly named "loss" is always a minimization quantity.
+        # Convert it directly to the internal higher-is-better convention and
+        # do not apply the problem direction a second time.
         if key == "loss":
-            x = -x
+            return -x
 
-        # If the real problem is minimization, smaller objective values are
-        # better. Convert them to higher-is-better scores by changing the sign.
+        # The remaining accepted fields follow the configured problem direction.
         if self._direction == "minimize":
-            x = -x
+            return -x
 
         return x
 
