@@ -168,6 +168,384 @@ class DifferentialEvolutionOptimizer(Optimizer):
         """True when the optimizer has reached its internal generation limit."""
         return self._generation >= self.max_generations
 
+
+    # ------------------------
+    # Checkpoint / resume
+    # ------------------------
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Return all state required to continue DE exactly.
+
+        Checkpoint v1 is deliberately restricted to generation boundaries.
+        A checkpoint may therefore be created only after tell() has completed
+        and cleared the target mapping from the preceding ask() call.
+        """
+
+        if self._last_targets:
+            raise RuntimeError(
+                "Differential Evolution checkpoint can only be created "
+                "between generations, after tell() has completed."
+            )
+
+        return {
+            "schema_version": 1,
+            "optimizer": "differential_evolution",
+
+            "configuration": {
+                "population_size": self.population_size,
+                "mutation_factor": self.mutation_factor,
+                "crossover_rate": self.crossover_rate,
+                "max_generations": self.max_generations,
+            },
+
+            "initialized": self._initialized,
+            "generation": self._generation,
+
+            "param_names": list(self._param_names),
+            "param_specs": dict(self._param_specs),
+            "direction": self._direction,
+
+            "population": [
+                dict(individual)
+                for individual in self._population
+            ],
+            "fitness": list(self._fitness),
+
+            # Checkpoint v1 never persists a partially evaluated generation.
+            "last_targets": [],
+
+            # Critical for exact deterministic continuation.
+            "rng_state": self._rng.getstate(),
+
+            "diagnostics": {
+                "n_status_failed": self._n_status_failed,
+                "n_missing_score": self._n_missing_score,
+                "n_non_numeric": self._n_non_numeric,
+                "n_non_finite": self._n_non_finite,
+            },
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore a state previously returned by state_dict()."""
+
+        if not isinstance(state, dict):
+            raise TypeError(
+                "Differential Evolution checkpoint state must be a dictionary"
+            )
+
+        if state.get("schema_version") != 1:
+            raise ValueError(
+                "Unsupported Differential Evolution checkpoint schema_version: "
+                f"{state.get('schema_version')!r}"
+            )
+
+        if state.get("optimizer") != "differential_evolution":
+            raise ValueError(
+                "Checkpoint optimizer mismatch: expected "
+                "'differential_evolution', got "
+                f"{state.get('optimizer')!r}"
+            )
+
+        # ------------------------------------------------------------
+        # Configuration compatibility
+        # ------------------------------------------------------------
+
+        configuration = state.get("configuration")
+
+        if not isinstance(configuration, dict):
+            raise ValueError(
+                "Differential Evolution checkpoint is missing configuration"
+            )
+
+        expected_configuration = {
+            "population_size": self.population_size,
+            "mutation_factor": self.mutation_factor,
+            "crossover_rate": self.crossover_rate,
+            "max_generations": self.max_generations,
+        }
+
+        for key, current_value in expected_configuration.items():
+            if key not in configuration:
+                raise ValueError(
+                    "Differential Evolution checkpoint configuration "
+                    f"is missing {key!r}"
+                )
+
+            checkpoint_value = configuration[key]
+
+            if checkpoint_value != current_value:
+                raise ValueError(
+                    "Differential Evolution checkpoint configuration mismatch "
+                    f"for {key}: checkpoint={checkpoint_value!r}, "
+                    f"current={current_value!r}"
+                )
+
+        # ------------------------------------------------------------
+        # General state
+        # ------------------------------------------------------------
+
+        initialized = state.get("initialized")
+
+        if not isinstance(initialized, bool):
+            raise ValueError(
+                "Checkpoint field 'initialized' must be boolean"
+            )
+
+        generation = state.get("generation")
+
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation < 0
+        ):
+            raise ValueError(
+                "Checkpoint field 'generation' must be a non-negative integer"
+            )
+
+        direction = state.get("direction")
+
+        if direction not in {"minimize", "maximize"}:
+            raise ValueError(
+                "Checkpoint direction must be 'minimize' or 'maximize'"
+            )
+
+        # ------------------------------------------------------------
+        # Parameter metadata
+        # ------------------------------------------------------------
+
+        param_names = state.get("param_names")
+
+        if not isinstance(param_names, list):
+            raise ValueError(
+                "Checkpoint field 'param_names' must be a list"
+            )
+
+        if not all(
+            isinstance(name, str) and name
+            for name in param_names
+        ):
+            raise ValueError(
+                "Checkpoint contains invalid parameter names"
+            )
+
+        param_specs_raw = state.get("param_specs")
+
+        if not isinstance(param_specs_raw, dict):
+            raise ValueError(
+                "Checkpoint field 'param_specs' must be a dictionary"
+            )
+
+        param_specs: Dict[str, Tuple[str, Tuple[float, float]]] = {}
+
+        for name in param_names:
+            if name not in param_specs_raw:
+                raise ValueError(
+                    f"Checkpoint is missing parameter specification for {name!r}"
+                )
+
+            spec = param_specs_raw[name]
+
+            if (
+                not isinstance(spec, (tuple, list))
+                or len(spec) != 2
+                or spec[0] not in {"real", "int"}
+                or not isinstance(spec[1], (tuple, list))
+                or len(spec[1]) != 2
+            ):
+                raise ValueError(
+                    f"Invalid parameter specification for {name!r}: {spec!r}"
+                )
+
+            kind = str(spec[0])
+            lo = float(spec[1][0])
+            hi = float(spec[1][1])
+
+            if kind == "real" and not lo < hi:
+                raise ValueError(
+                    f"Invalid real bounds for {name!r}: {lo}, {hi}"
+                )
+
+            if kind == "int" and lo > hi:
+                raise ValueError(
+                    f"Invalid integer bounds for {name!r}: {lo}, {hi}"
+                )
+
+            param_specs[name] = (
+                kind,
+                (lo, hi),
+            )
+
+        # ------------------------------------------------------------
+        # Population
+        # ------------------------------------------------------------
+
+        population_raw = state.get("population")
+
+        if not isinstance(population_raw, list):
+            raise ValueError(
+                "Checkpoint field 'population' must be a list"
+            )
+
+        population: List[Dict[str, Any]] = []
+
+        for index, individual in enumerate(population_raw):
+            if not isinstance(individual, dict):
+                raise ValueError(
+                    f"Checkpoint population entry {index} is not a dictionary"
+                )
+
+            missing = [
+                name
+                for name in param_names
+                if name not in individual
+            ]
+
+            if missing:
+                raise ValueError(
+                    f"Checkpoint population entry {index} "
+                    f"is missing parameters: {missing}"
+                )
+
+            population.append(dict(individual))
+
+        # ------------------------------------------------------------
+        # Fitness
+        # ------------------------------------------------------------
+
+        fitness_raw = state.get("fitness")
+
+        if not isinstance(fitness_raw, list):
+            raise ValueError(
+                "Checkpoint field 'fitness' must be a list"
+            )
+
+        fitness: List[float | None] = []
+
+        for value in fitness_raw:
+            if value is None:
+                fitness.append(None)
+            else:
+                try:
+                    fitness.append(float(value))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid checkpoint fitness value: {value!r}"
+                    ) from exc
+
+        # ------------------------------------------------------------
+        # Generation boundary
+        # ------------------------------------------------------------
+
+        last_targets = state.get("last_targets", [])
+
+        if not isinstance(last_targets, list):
+            raise ValueError(
+                "Checkpoint field 'last_targets' must be a list"
+            )
+
+        if last_targets:
+            raise ValueError(
+                "Differential Evolution checkpoint contains a partial "
+                "generation. Checkpoint v1 only supports generation boundaries."
+            )
+
+        if initialized:
+            if not param_names:
+                raise ValueError(
+                    "Initialized DE checkpoint contains no parameters"
+                )
+
+            if len(population) != self.population_size:
+                raise ValueError(
+                    "Differential Evolution checkpoint population size mismatch: "
+                    f"checkpoint={len(population)}, "
+                    f"expected={self.population_size}"
+                )
+
+            if len(fitness) != self.population_size:
+                raise ValueError(
+                    "Differential Evolution checkpoint fitness size mismatch: "
+                    f"checkpoint={len(fitness)}, "
+                    f"expected={self.population_size}"
+                )
+
+        # ------------------------------------------------------------
+        # RNG
+        # ------------------------------------------------------------
+
+        rng_state = state.get("rng_state")
+
+        if rng_state is None:
+            raise ValueError(
+                "Differential Evolution checkpoint is missing RNG state"
+            )
+
+        rng_probe = random.Random()
+
+        try:
+            rng_probe.setstate(rng_state)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Differential Evolution checkpoint contains invalid RNG state"
+            ) from exc
+
+        # ------------------------------------------------------------
+        # Diagnostics
+        # ------------------------------------------------------------
+
+        diagnostics = state.get("diagnostics", {})
+
+        if not isinstance(diagnostics, dict):
+            raise ValueError(
+                "Checkpoint diagnostics must be a dictionary"
+            )
+
+        diagnostic_values: Dict[str, int] = {}
+
+        for key in (
+            "n_status_failed",
+            "n_missing_score",
+            "n_non_numeric",
+            "n_non_finite",
+        ):
+            value = diagnostics.get(key, 0)
+
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"Checkpoint diagnostic {key!r} "
+                    "must be a non-negative integer"
+                )
+
+            diagnostic_values[key] = value
+
+        # ------------------------------------------------------------
+        # Commit validated state to this optimizer
+        # ------------------------------------------------------------
+
+        self._initialized = initialized
+        self._generation = generation
+
+        self._param_names = list(param_names)
+        self._param_specs = param_specs
+        self._direction = str(direction)
+
+        self._population = population
+        self._fitness = fitness
+
+        self._last_targets = []
+
+        self._rng.setstate(rng_state)
+
+        self._n_status_failed = diagnostic_values["n_status_failed"]
+        self._n_missing_score = diagnostic_values["n_missing_score"]
+        self._n_non_numeric = diagnostic_values["n_non_numeric"]
+        self._n_non_finite = diagnostic_values["n_non_finite"]
+
+
     # ------------------------
     # Internal helpers
     # ------------------------
