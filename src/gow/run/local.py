@@ -13,6 +13,7 @@ from gow.optimizer import make_optimizer
 from gow.output.jsonl import append_jsonl_line
 from gow.fw.tasks import rebuild_problem_results_jsonl, rebuild_run_results_jsonl, verify_run_results_complete
 from gow.postprocess import archive_generation_workdirs, finalize_generation
+from gow.run.control import acknowledge_pause_request, read_pause_request
 
 
 def _optimizer_kwargs(problem: ProblemConfig) -> Dict[str, Any]:
@@ -233,16 +234,35 @@ def run_local_optimization(
             n_done + opt_cfg.batch_size - 1
         ) // opt_cfg.batch_size
 
-        checkpoint_status = (
-            "completed"
-            if n_done >= opt_cfg.max_evaluations
-            else "running"
-        )
+        # Pause requests are honoured only at a completed-generation boundary.
+        # Completion takes precedence if max_evaluations has already been reached.
+        pause_request = None
+
+        if n_done < opt_cfg.max_evaluations:
+            pause_request = read_pause_request(
+                run_root
+            )
 
         try:
             optimizer_state = optimizer.state_dict()
         except NotImplementedError:
             optimizer_state = None
+
+        if pause_request is not None and optimizer_state is None:
+            raise RuntimeError(
+                "Pause requested, but optimizer "
+                f"{opt_cfg.name!r} does not support checkpoint persistence."
+            )
+
+        checkpoint_status = (
+            "completed"
+            if n_done >= opt_cfg.max_evaluations
+            else (
+                "paused"
+                if pause_request is not None
+                else "running"
+            )
+        )
 
         if optimizer_state is not None:
             checkpoint_store.save(
@@ -259,6 +279,27 @@ def run_local_optimization(
                 },
                 optimizer_state=optimizer_state,
             )
+
+        if pause_request is not None:
+            # Materialize a consistent partial run-level results.jsonl from
+            # the generation shards already finalized on disk.
+            run_results_path = rebuild_run_results_jsonl(
+                outdir,
+                run_id_val,
+            )
+
+            # The acknowledgement is emitted only after both the optimizer
+            # checkpoint and partial run results have been persisted.
+            acknowledge_pause_request(
+                run_root,
+                pause_request,
+                evaluations_done=n_done,
+                completed_generations=completed_generations,
+            )
+
+            # A paused run is intentionally incomplete.
+            # Do not execute final completeness verification or global rebuild.
+            return run_results_path
 
     ok, actual = verify_run_results_complete(outdir, run_id_val, opt_cfg.max_evaluations)
     if not ok:
