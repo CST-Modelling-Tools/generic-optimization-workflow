@@ -66,6 +66,84 @@ def _default_run_id() -> str:
     return str(uuid.uuid4())
 
 
+def _load_existing_run_state(
+    results_path: Path,
+    *,
+    maximize: bool,
+) -> tuple[int, Optional[Dict[str, Any]]]:
+    """Return persisted result count and best-so-far for a resumed run."""
+
+    if not results_path.is_file():
+        return 0, None
+
+    count = 0
+    best: Optional[Dict[str, Any]] = None
+
+    with results_path.open(
+        "r",
+        encoding="utf-8",
+    ) as handle:
+        for line in handle:
+            line = line.strip()
+
+            if not line:
+                continue
+
+            record = json.loads(line)
+
+            if not isinstance(record, dict):
+                continue
+
+            count += 1
+
+            fit = record.get("fitness")
+
+            if (
+                not isinstance(fit, dict)
+                or fit.get("status") != "ok"
+            ):
+                continue
+
+            obj = fit.get("objective")
+
+            try:
+                objective = float(obj)
+            except (TypeError, ValueError):
+                continue
+
+            if (
+                best is None
+                or (
+                    maximize
+                    and objective > best["objective"]
+                )
+                or (
+                    not maximize
+                    and objective < best["objective"]
+                )
+            ):
+                best = {
+                    "objective": objective,
+                    "candidate_id": record.get(
+                        "candidate_id"
+                    ),
+                    "candidate_local_id": record.get(
+                        "candidate_local_id"
+                    ),
+                    "attempt_id": record.get(
+                        "attempt_id"
+                    ),
+                    "generation_id": record.get(
+                        "generation_id"
+                    ),
+                    "params": record.get(
+                        "params"
+                    ),
+                }
+
+    return count, best
+
+
 def run_local_optimization(
     problem: ProblemConfig,
     *,
@@ -73,8 +151,14 @@ def run_local_optimization(
     run_id: Optional[str] = None,
     archive_generations: bool = False,
     delete_archived_workdirs: bool = False,
+    resume_from_checkpoint: bool = False,
 ) -> Path:
     outdir = Path(outdir).expanduser().resolve()
+    if resume_from_checkpoint and run_id is None:
+        raise ValueError(
+            "Resuming a local run requires an explicit run_id"
+        )
+
     run_id_val = run_id or _default_run_id()
 
     runs_root = outdir / "runs"
@@ -108,6 +192,155 @@ def run_local_optimization(
     best: Optional[Dict[str, Any]] = None
 
     n_done = 0
+
+    if resume_from_checkpoint:
+        if name_norm not in {
+            "differential_evolution",
+            "de",
+        }:
+            raise ValueError(
+                "Checkpoint resume is currently supported "
+                "only for Differential Evolution"
+            )
+
+        loaded_checkpoint = checkpoint_store.load()
+
+        manifest = loaded_checkpoint.manifest
+
+        if manifest.get("schema_version") != 1:
+            raise RuntimeError(
+                "Unsupported checkpoint schema_version"
+            )
+
+        if manifest.get("status") != "paused":
+            raise RuntimeError(
+                "Only checkpoints with status='paused' "
+                "can be resumed"
+            )
+
+        if manifest.get("run_id") != run_id_val:
+            raise RuntimeError(
+                "Checkpoint run_id does not match requested run_id"
+            )
+
+        if manifest.get("problem_id") != problem.id:
+            raise RuntimeError(
+                "Checkpoint problem_id does not match current problem"
+            )
+
+        checkpoint_optimizer = str(
+            manifest.get("optimizer", "")
+        ).lower().strip()
+
+        de_names = {
+            "differential_evolution",
+            "de",
+        }
+
+        if (
+            checkpoint_optimizer not in de_names
+            or name_norm not in de_names
+        ):
+            raise RuntimeError(
+                "Checkpoint optimizer does not match "
+                "Differential Evolution"
+            )
+
+        checkpoint_max_evaluations = manifest.get(
+            "max_evaluations"
+        )
+
+        if (
+            isinstance(checkpoint_max_evaluations, bool)
+            or checkpoint_max_evaluations
+            != opt_cfg.max_evaluations
+        ):
+            raise RuntimeError(
+                "Checkpoint max_evaluations does not match "
+                "current problem configuration"
+            )
+
+        evaluations_done = manifest.get(
+            "evaluations_done"
+        )
+
+        if (
+            isinstance(evaluations_done, bool)
+            or not isinstance(evaluations_done, int)
+        ):
+            raise RuntimeError(
+                "Checkpoint evaluations_done must be an integer"
+            )
+
+        if (
+            evaluations_done <= 0
+            or evaluations_done
+            >= opt_cfg.max_evaluations
+        ):
+            raise RuntimeError(
+                "Paused checkpoint evaluations_done is out of range"
+            )
+
+        if (
+            evaluations_done
+            % opt_cfg.batch_size
+            != 0
+        ):
+            raise RuntimeError(
+                "Differential Evolution checkpoint is not "
+                "at a complete-generation boundary"
+            )
+
+        expected_generations = (
+            evaluations_done
+            // opt_cfg.batch_size
+        )
+
+        if (
+            manifest.get("completed_generations")
+            != expected_generations
+        ):
+            raise RuntimeError(
+                "Checkpoint completed_generations is inconsistent "
+                "with evaluations_done"
+            )
+
+        if (
+            manifest.get("next_generation")
+            != expected_generations
+        ):
+            raise RuntimeError(
+                "Checkpoint next_generation is inconsistent "
+                "with evaluations_done"
+            )
+
+        # Rebuild the partial run-level result stream from persisted
+        # generation shards before trusting the execution cursor.
+        run_results_path = rebuild_run_results_jsonl(
+            outdir,
+            run_id_val,
+        )
+
+        existing_count, best = _load_existing_run_state(
+            run_results_path,
+            maximize=maximize,
+        )
+
+        if existing_count != evaluations_done:
+            raise RuntimeError(
+                "Checkpoint/result mismatch: "
+                f"checkpoint has {evaluations_done} evaluations "
+                f"but persisted results contain {existing_count}"
+            )
+
+        # This is a fresh optimizer object. All algorithmic state,
+        # including the RNG state, must come from disk.
+        optimizer.load_state_dict(
+            loaded_checkpoint.optimizer_state
+        )
+
+        n_done = evaluations_done
+
     while n_done < opt_cfg.max_evaluations:
         n_batch = min(opt_cfg.batch_size, opt_cfg.max_evaluations - n_done)
         generation_id = n_done // opt_cfg.batch_size
@@ -323,3 +556,22 @@ def run_local_optimization(
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 
     return problem_results_path
+
+def resume_local_optimization(
+    problem: ProblemConfig,
+    *,
+    outdir: str | Path = "results",
+    run_id: str,
+    archive_generations: bool = False,
+    delete_archived_workdirs: bool = False,
+) -> Path:
+    """Resume a paused local optimization run from its checkpoint."""
+
+    return run_local_optimization(
+        problem,
+        outdir=outdir,
+        run_id=run_id,
+        archive_generations=archive_generations,
+        delete_archived_workdirs=delete_archived_workdirs,
+        resume_from_checkpoint=True,
+    )
