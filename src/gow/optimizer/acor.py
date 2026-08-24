@@ -363,6 +363,11 @@ class ACOROptimizer(Optimizer):
         self._n_non_finite = 0
         self._n_invalid_candidates = 0
 
+        # Checkpoint v1 is allowed only between complete generations.
+        # ask() marks that an evaluation batch is in flight and tell()
+        # clears the flag only after the archive has been updated.
+        self._awaiting_tell = False
+
     def ask(self, problem: ProblemConfig, n: int) -> List[Dict[str, Any]]:
         """
         Generate candidates for GOW to evaluate.
@@ -423,12 +428,22 @@ class ACOROptimizer(Optimizer):
         # ACOR starts by generating random candidates inside the configured
         # bounds. It does not force the YAML value candidate into the first
         # generation.
-        if not self._archive:
-            return self._initial_candidates(n)
 
-        # Later generations: the archive contains evaluated candidates, so new
-        # candidates are sampled around archive entries.
-        return [self._sample_candidate_from_archive() for _ in range(n)]
+        if not self._archive:
+            candidates = self._initial_candidates(n)
+        else:
+            # Later generations sample around the ranked archive.
+            candidates = [
+                self._sample_candidate_from_archive()
+                for _ in range(n)
+            ]
+
+        # From this point the RNG has already advanced. A checkpoint here
+        # would not represent a complete generation because the candidates
+        # have not yet been incorporated into the archive by tell().
+        self._awaiting_tell = True
+
+        return candidates
 
     def tell(self, candidates: List[Dict[str, Any]], fitness: List[Dict[str, Any]]) -> None:
         """
@@ -533,6 +548,653 @@ class ACOROptimizer(Optimizer):
 
         # One complete generation has finished.
         self._generation += 1
+
+        # The whole generation is now committed to the archive.
+        self._awaiting_tell = False
+
+
+    # ------------------------
+    # Checkpoint / resume
+    # ------------------------
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Return all state required to continue ACOR exactly.
+
+        Checkpoint v1 is deliberately restricted to generation boundaries.
+        ask() consumes randomness before the evaluator runs, therefore an
+        outstanding ask() must never be persisted as a completed generation.
+        """
+
+        if self._awaiting_tell:
+            raise RuntimeError(
+                "ACOR checkpoint can only be created between generations, "
+                "after tell() has completed."
+            )
+
+        if not self._initialized:
+            raise RuntimeError(
+                "ACOR checkpoint requires an initialized optimizer."
+            )
+
+        if self.batch_size is None or self.archive_size is None:
+            raise RuntimeError(
+                "ACOR checkpoint requires a fixed batch/archive size."
+            )
+
+        return {
+            "schema_version": 1,
+            "optimizer": "acor",
+
+            "configuration": {
+                "batch_size": self.batch_size,
+                "q": self.q,
+                "xi": self.xi,
+                "max_generations": self.max_generations,
+                "min_sigma": self.min_sigma,
+                "bound_strategy": self.bound_strategy,
+            },
+
+            "initialized": self._initialized,
+            "generation": self._generation,
+            "direction": self._direction,
+
+            "param_names": list(
+                self._param_names
+            ),
+            "param_specs": dict(
+                self._param_specs
+            ),
+
+            "archive_size": self.archive_size,
+            "ants": self.ants,
+
+            "archive": [
+                {
+                    "x": list(row["x"]),
+                    "candidate": dict(row["candidate"]),
+                    "score": row["score"],
+                }
+                for row in self._archive
+            ],
+
+            "best_score": self._best_score,
+            "best_candidate": (
+                None
+                if self._best_candidate is None
+                else dict(self._best_candidate)
+            ),
+
+            # A valid checkpoint is never mid-generation.
+            "awaiting_tell": False,
+
+            # Critical for deterministic continuation.
+            "rng_state": self._rng.getstate(),
+
+            "diagnostics": {
+                "n_status_failed": self._n_status_failed,
+                "n_missing_score": self._n_missing_score,
+                "n_non_numeric": self._n_non_numeric,
+                "n_non_finite": self._n_non_finite,
+                "n_invalid_candidates": self._n_invalid_candidates,
+            },
+        }
+
+    def load_state_dict(
+        self,
+        state: Dict[str, Any],
+    ) -> None:
+        """Restore a state previously returned by state_dict()."""
+
+        if not isinstance(state, dict):
+            raise TypeError(
+                "ACOR checkpoint state must be a dictionary"
+            )
+
+        if state.get("schema_version") != 1:
+            raise ValueError(
+                "Unsupported ACOR checkpoint schema_version: "
+                f"{state.get('schema_version')!r}"
+            )
+
+        if state.get("optimizer") != "acor":
+            raise ValueError(
+                "Checkpoint optimizer mismatch: expected 'acor', got "
+                f"{state.get('optimizer')!r}"
+            )
+
+        # --------------------------------------------------------
+        # Configuration compatibility
+        # --------------------------------------------------------
+
+        configuration = state.get(
+            "configuration"
+        )
+
+        if not isinstance(configuration, dict):
+            raise ValueError(
+                "ACOR checkpoint is missing configuration"
+            )
+
+        checkpoint_batch_size = configuration.get(
+            "batch_size"
+        )
+
+        if (
+            isinstance(checkpoint_batch_size, bool)
+            or not isinstance(checkpoint_batch_size, int)
+            or checkpoint_batch_size < 2
+        ):
+            raise ValueError(
+                "ACOR checkpoint batch_size must be an integer >= 2"
+            )
+
+        # ACOR can be constructed without batch_size because normal GOW
+        # execution historically fixes it on the first ask(). During resume,
+        # no new ask() must occur before restoration, so None may safely adopt
+        # the persisted value.
+        if (
+            self.batch_size is not None
+            and self.batch_size != checkpoint_batch_size
+        ):
+            raise ValueError(
+                "ACOR checkpoint configuration mismatch for batch_size: "
+                f"checkpoint={checkpoint_batch_size!r}, "
+                f"current={self.batch_size!r}"
+            )
+
+        expected_configuration = {
+            "q": self.q,
+            "xi": self.xi,
+            "max_generations": self.max_generations,
+            "min_sigma": self.min_sigma,
+            "bound_strategy": self.bound_strategy,
+        }
+
+        for key, current_value in expected_configuration.items():
+
+            if key not in configuration:
+                raise ValueError(
+                    "ACOR checkpoint configuration "
+                    f"is missing {key!r}"
+                )
+
+            checkpoint_value = configuration[
+                key
+            ]
+
+            if checkpoint_value != current_value:
+                raise ValueError(
+                    "ACOR checkpoint configuration mismatch "
+                    f"for {key}: "
+                    f"checkpoint={checkpoint_value!r}, "
+                    f"current={current_value!r}"
+                )
+
+        # --------------------------------------------------------
+        # General state
+        # --------------------------------------------------------
+
+        initialized = state.get(
+            "initialized"
+        )
+
+        if initialized is not True:
+            raise ValueError(
+                "ACOR checkpoint must contain initialized=True"
+            )
+
+        generation = state.get(
+            "generation"
+        )
+
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            raise ValueError(
+                "ACOR checkpoint generation must be an integer >= 1"
+            )
+
+        direction = state.get(
+            "direction"
+        )
+
+        if direction not in {
+            "minimize",
+            "maximize",
+        }:
+            raise ValueError(
+                "ACOR checkpoint direction must be "
+                "'minimize' or 'maximize'"
+            )
+
+        if state.get("awaiting_tell") is not False:
+            raise ValueError(
+                "ACOR checkpoint must represent a generation boundary"
+            )
+
+        # --------------------------------------------------------
+        # Parameter metadata
+        # --------------------------------------------------------
+
+        param_names = state.get(
+            "param_names"
+        )
+
+        if (
+            not isinstance(param_names, list)
+            or not param_names
+        ):
+            raise ValueError(
+                "ACOR checkpoint param_names must be a non-empty list"
+            )
+
+        if (
+            not all(
+                isinstance(name, str)
+                and bool(name)
+                for name in param_names
+            )
+            or len(set(param_names)) != len(param_names)
+        ):
+            raise ValueError(
+                "ACOR checkpoint contains invalid parameter names"
+            )
+
+        param_specs_raw = state.get(
+            "param_specs"
+        )
+
+        if not isinstance(param_specs_raw, dict):
+            raise ValueError(
+                "ACOR checkpoint param_specs must be a dictionary"
+            )
+
+        param_specs: Dict[
+            str,
+            Tuple[
+                str,
+                Tuple[float, float],
+            ],
+        ] = {}
+
+        for name in param_names:
+
+            if name not in param_specs_raw:
+                raise ValueError(
+                    "ACOR checkpoint is missing parameter "
+                    f"specification for {name!r}"
+                )
+
+            spec = param_specs_raw[name]
+
+            if (
+                not isinstance(spec, (tuple, list))
+                or len(spec) != 2
+                or spec[0] not in {"real", "int"}
+                or not isinstance(spec[1], (tuple, list))
+                or len(spec[1]) != 2
+            ):
+                raise ValueError(
+                    "Invalid ACOR parameter specification "
+                    f"for {name!r}: {spec!r}"
+                )
+
+            kind = str(spec[0])
+
+            try:
+                lo = float(spec[1][0])
+                hi = float(spec[1][1])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Invalid ACOR parameter bounds "
+                    f"for {name!r}"
+                ) from exc
+
+            if (
+                not math.isfinite(lo)
+                or not math.isfinite(hi)
+            ):
+                raise ValueError(
+                    "ACOR checkpoint parameter bounds "
+                    "must be finite"
+                )
+
+            if kind == "real" and not lo < hi:
+                raise ValueError(
+                    f"Invalid real bounds for {name!r}"
+                )
+
+            if kind == "int" and lo > hi:
+                raise ValueError(
+                    f"Invalid integer bounds for {name!r}"
+                )
+
+            param_specs[name] = (
+                kind,
+                (lo, hi),
+            )
+
+        if set(param_specs_raw) != set(param_names):
+            raise ValueError(
+                "ACOR checkpoint param_specs keys do not match param_names"
+            )
+
+        # --------------------------------------------------------
+        # Archive structure
+        # --------------------------------------------------------
+
+        archive_size = state.get(
+            "archive_size"
+        )
+
+        ants = state.get(
+            "ants"
+        )
+
+        if (
+            archive_size != checkpoint_batch_size
+            or ants != checkpoint_batch_size
+        ):
+            raise ValueError(
+                "ACOR checkpoint archive_size/ants must equal batch_size"
+            )
+
+        archive_raw = state.get(
+            "archive"
+        )
+
+        if not isinstance(archive_raw, list):
+            raise ValueError(
+                "ACOR checkpoint archive must be a list"
+            )
+
+        if len(archive_raw) > checkpoint_batch_size:
+            raise ValueError(
+                "ACOR checkpoint archive exceeds archive_size"
+            )
+
+        archive: List[
+            Dict[str, Any]
+        ] = []
+
+        previous_score: float | None = None
+
+        for row in archive_raw:
+
+            if not isinstance(row, dict):
+                raise ValueError(
+                    "ACOR checkpoint archive entries must be dictionaries"
+                )
+
+            x_raw = row.get(
+                "x"
+            )
+
+            if (
+                not isinstance(x_raw, list)
+                or len(x_raw) != len(param_names)
+            ):
+                raise ValueError(
+                    "ACOR checkpoint archive vector has invalid dimension"
+                )
+
+            x: List[float] = []
+
+            for value in x_raw:
+                try:
+                    x_value = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "ACOR checkpoint archive vector "
+                        "contains a non-numeric value"
+                    ) from exc
+
+                if (
+                    not math.isfinite(x_value)
+                    or x_value < 0.0
+                    or x_value > 1.0
+                ):
+                    raise ValueError(
+                        "ACOR checkpoint normalized archive values "
+                        "must be finite and inside [0, 1]"
+                    )
+
+                x.append(
+                    x_value
+                )
+
+            candidate = row.get(
+                "candidate"
+            )
+
+            if not isinstance(candidate, dict):
+                raise ValueError(
+                    "ACOR checkpoint archive candidate "
+                    "must be a dictionary"
+                )
+
+            if not all(
+                name in candidate
+                for name in param_names
+            ):
+                raise ValueError(
+                    "ACOR checkpoint archive candidate "
+                    "is missing optimizable parameters"
+                )
+
+            score_raw = row.get(
+                "score"
+            )
+
+            try:
+                score = float(
+                    score_raw
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "ACOR checkpoint archive score "
+                    "must be numeric"
+                ) from exc
+
+            if not math.isfinite(score):
+                raise ValueError(
+                    "ACOR checkpoint archive score "
+                    "must be finite"
+                )
+
+            if (
+                previous_score is not None
+                and score > previous_score
+            ):
+                raise ValueError(
+                    "ACOR checkpoint archive must be sorted "
+                    "from best to worst"
+                )
+
+            previous_score = score
+
+            archive.append(
+                {
+                    "x": x,
+                    "candidate": dict(candidate),
+                    "score": score,
+                }
+            )
+
+        # --------------------------------------------------------
+        # Best-so-far
+        # --------------------------------------------------------
+
+        best_score_raw = state.get(
+            "best_score"
+        )
+
+        if best_score_raw is None:
+            best_score = None
+        else:
+            try:
+                best_score = float(
+                    best_score_raw
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "ACOR checkpoint best_score must be numeric or None"
+                ) from exc
+
+            if not math.isfinite(
+                best_score
+            ):
+                raise ValueError(
+                    "ACOR checkpoint best_score must be finite"
+                )
+
+        best_candidate_raw = state.get(
+            "best_candidate"
+        )
+
+        if best_candidate_raw is None:
+            best_candidate = None
+        elif isinstance(
+            best_candidate_raw,
+            dict,
+        ):
+            best_candidate = dict(
+                best_candidate_raw
+            )
+        else:
+            raise ValueError(
+                "ACOR checkpoint best_candidate "
+                "must be a dictionary or None"
+            )
+
+        if (
+            (best_score is None)
+            != (best_candidate is None)
+        ):
+            raise ValueError(
+                "ACOR checkpoint best_score and best_candidate "
+                "must either both exist or both be None"
+            )
+
+        if archive and best_score is None:
+            raise ValueError(
+                "ACOR checkpoint with a non-empty archive "
+                "requires best_score"
+            )
+
+        # --------------------------------------------------------
+        # Diagnostics
+        # --------------------------------------------------------
+
+        diagnostics = state.get(
+            "diagnostics"
+        )
+
+        if not isinstance(
+            diagnostics,
+            dict,
+        ):
+            raise ValueError(
+                "ACOR checkpoint diagnostics must be a dictionary"
+            )
+
+        diagnostic_names = (
+            "n_status_failed",
+            "n_missing_score",
+            "n_non_numeric",
+            "n_non_finite",
+            "n_invalid_candidates",
+        )
+
+        diagnostic_values: Dict[
+            str,
+            int,
+        ] = {}
+
+        for name in diagnostic_names:
+
+            value = diagnostics.get(
+                name
+            )
+
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(
+                    "ACOR checkpoint diagnostic "
+                    f"{name!r} must be a non-negative integer"
+                )
+
+            diagnostic_values[
+                name
+            ] = value
+
+        # --------------------------------------------------------
+        # RNG state
+        # --------------------------------------------------------
+
+        rng_state = state.get(
+            "rng_state"
+        )
+
+        probe_rng = random.Random()
+
+        try:
+            probe_rng.setstate(
+                rng_state
+            )
+        except Exception as exc:
+            raise ValueError(
+                "ACOR checkpoint contains invalid RNG state"
+            ) from exc
+
+        # --------------------------------------------------------
+        # Commit validated state
+        # --------------------------------------------------------
+
+        self.batch_size = checkpoint_batch_size
+        self.archive_size = checkpoint_batch_size
+        self.ants = checkpoint_batch_size
+
+        self._initialized = True
+        self._generation = generation
+        self._direction = direction
+
+        self._param_names = list(
+            param_names
+        )
+        self._param_specs = param_specs
+
+        self._archive = archive
+
+        self._best_score = best_score
+        self._best_candidate = best_candidate
+
+        self._awaiting_tell = False
+
+        self._n_status_failed = diagnostic_values[
+            "n_status_failed"
+        ]
+        self._n_missing_score = diagnostic_values[
+            "n_missing_score"
+        ]
+        self._n_non_numeric = diagnostic_values[
+            "n_non_numeric"
+        ]
+        self._n_non_finite = diagnostic_values[
+            "n_non_finite"
+        ]
+        self._n_invalid_candidates = diagnostic_values[
+            "n_invalid_candidates"
+        ]
+
+        self._rng.setstate(
+            rng_state
+        )
 
     def is_done(self) -> bool:
         """
