@@ -194,13 +194,30 @@ def run_local_optimization(
     n_done = 0
 
     if resume_from_checkpoint:
-        if name_norm not in {
-            "differential_evolution",
-            "de",
-        }:
+        resume_optimizer_aliases = {
+            "differential_evolution": {
+                "differential_evolution",
+                "de",
+            },
+            "de": {
+                "differential_evolution",
+                "de",
+            },
+            "acor": {
+                "acor",
+            },
+        }
+
+        accepted_checkpoint_names = (
+            resume_optimizer_aliases.get(
+                name_norm
+            )
+        )
+
+        if accepted_checkpoint_names is None:
             raise ValueError(
                 "Checkpoint resume is currently supported "
-                "only for Differential Evolution"
+                "only for Differential Evolution and ACOR"
             )
 
         loaded_checkpoint = checkpoint_store.load()
@@ -232,18 +249,13 @@ def run_local_optimization(
             manifest.get("optimizer", "")
         ).lower().strip()
 
-        de_names = {
-            "differential_evolution",
-            "de",
-        }
-
         if (
-            checkpoint_optimizer not in de_names
-            or name_norm not in de_names
+            checkpoint_optimizer
+            not in accepted_checkpoint_names
         ):
             raise RuntimeError(
                 "Checkpoint optimizer does not match "
-                "Differential Evolution"
+                "the current optimizer configuration"
             )
 
         checkpoint_max_evaluations = manifest.get(
@@ -251,7 +263,10 @@ def run_local_optimization(
         )
 
         if (
-            isinstance(checkpoint_max_evaluations, bool)
+            isinstance(
+                checkpoint_max_evaluations,
+                bool,
+            )
             or checkpoint_max_evaluations
             != opt_cfg.max_evaluations
         ):
@@ -266,7 +281,10 @@ def run_local_optimization(
 
         if (
             isinstance(evaluations_done, bool)
-            or not isinstance(evaluations_done, int)
+            or not isinstance(
+                evaluations_done,
+                int,
+            )
         ):
             raise RuntimeError(
                 "Checkpoint evaluations_done must be an integer"
@@ -287,7 +305,7 @@ def run_local_optimization(
             != 0
         ):
             raise RuntimeError(
-                "Differential Evolution checkpoint is not "
+                "Optimizer checkpoint is not "
                 "at a complete-generation boundary"
             )
 
@@ -297,7 +315,9 @@ def run_local_optimization(
         )
 
         if (
-            manifest.get("completed_generations")
+            manifest.get(
+                "completed_generations"
+            )
             != expected_generations
         ):
             raise RuntimeError(
@@ -306,7 +326,9 @@ def run_local_optimization(
             )
 
         if (
-            manifest.get("next_generation")
+            manifest.get(
+                "next_generation"
+            )
             != expected_generations
         ):
             raise RuntimeError(
@@ -321,9 +343,11 @@ def run_local_optimization(
             run_id_val,
         )
 
-        existing_count, best = _load_existing_run_state(
-            run_results_path,
-            maximize=maximize,
+        existing_count, best = (
+            _load_existing_run_state(
+                run_results_path,
+                maximize=maximize,
+            )
         )
 
         if existing_count != evaluations_done:
@@ -333,8 +357,11 @@ def run_local_optimization(
                 f"but persisted results contain {existing_count}"
             )
 
-        # This is a fresh optimizer object. All algorithmic state,
-        # including the RNG state, must come from disk.
+        # The optimizer object is freshly constructed.
+        # All algorithmic state must now come from disk.
+        #
+        # Differential Evolution restores its population and RNG.
+        # ACOR restores its archive, metadata, generation and RNG.
         optimizer.load_state_dict(
             loaded_checkpoint.optimizer_state
         )
