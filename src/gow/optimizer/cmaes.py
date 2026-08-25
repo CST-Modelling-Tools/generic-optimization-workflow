@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Mapping, Tuple
 
+import pickle
 import cma
 
 from gow.config.models import CategoricalParam, IntParam, ProblemConfig, RealParam
@@ -506,6 +507,848 @@ class CMAESOptimizer(Optimizer):
         # Clear the stored vectors so tell() cannot accidentally be called twice
         # for the same ask() output.
         self._last_xs = []
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Return the complete state required to resume CMA-ES exactly.
+
+        Checkpoint schema v1 is deliberately restricted to complete
+        generation boundaries. The population returned by ask() must already
+        have been evaluated and consumed by tell() before this method is used.
+        """
+
+        if self._last_xs:
+            raise RuntimeError(
+                "CMA-ES checkpoint can only be created "
+                "between generations, after tell() has completed."
+            )
+
+        if (
+            not self._initialized
+            or self._es is None
+        ):
+            raise RuntimeError(
+                "CMA-ES checkpoint requires an initialized optimizer."
+            )
+
+        if self._generation < 1:
+            raise RuntimeError(
+                "CMA-ES checkpoint requires at least "
+                "one completed generation."
+            )
+
+        cma_version = str(
+            getattr(
+                cma,
+                "__version__",
+                "",
+            )
+        ).strip()
+
+        if not cma_version:
+            raise RuntimeError(
+                "Cannot determine installed cma package version."
+            )
+
+        try:
+            es_pickle = self._es.pickle_dumps()
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not serialize internal CMA-ES state."
+            ) from exc
+
+        if (
+            not isinstance(es_pickle, bytes)
+            or not es_pickle
+        ):
+            raise RuntimeError(
+                "CMAEvolutionStrategy.pickle_dumps() "
+                "did not return non-empty bytes."
+            )
+
+        es_countiter = int(
+            getattr(
+                self._es,
+                "countiter",
+                -1,
+            )
+        )
+
+        es_countevals = int(
+            getattr(
+                self._es,
+                "countevals",
+                -1,
+            )
+        )
+
+        if es_countiter != self._generation:
+            raise RuntimeError(
+                "CMA-ES wrapper generation is inconsistent "
+                "with the internal strategy."
+            )
+
+        if es_countevals < 0:
+            raise RuntimeError(
+                "CMA-ES internal evaluation counter is invalid."
+            )
+
+        return {
+            "schema_version": 1,
+            "optimizer": "cmaes",
+
+            "cma_version": cma_version,
+
+            "configuration": {
+                "batch_size": self.batch_size,
+                "population_size": self.population_size,
+                "sigma0": self.sigma0,
+                "max_generations": self.max_generations,
+                "seed": self.seed,
+            },
+
+            "initialized": True,
+            "generation": self._generation,
+            "direction": self._direction,
+
+            "param_names": list(
+                self._param_names
+            ),
+
+            "param_specs": dict(
+                self._param_specs
+            ),
+
+            # Checkpoint v1 never persists a pending ask().
+            "last_xs": [],
+
+            "best_score": self._best_score,
+
+            "best_candidate": (
+                dict(self._best_candidate)
+                if self._best_candidate
+                is not None
+                else None
+            ),
+
+            "diagnostics": {
+                "n_status_failed":
+                    self._n_status_failed,
+                "n_missing_score":
+                    self._n_missing_score,
+                "n_non_numeric":
+                    self._n_non_numeric,
+                "n_non_finite":
+                    self._n_non_finite,
+            },
+
+            # Useful consistency metadata around the opaque pycma state.
+            "es_countiter": es_countiter,
+            "es_countevals": es_countevals,
+
+            # pycma owns the covariance matrix, evolution paths,
+            # step-size state and stochastic continuation.
+            "es_pickle": es_pickle,
+        }
+
+    def load_state_dict(
+        self,
+        state: Dict[str, Any],
+    ) -> None:
+        """Restore a state previously returned by state_dict()."""
+
+        if not isinstance(
+            state,
+            dict,
+        ):
+            raise TypeError(
+                "CMA-ES checkpoint state must be a dictionary"
+            )
+
+        if state.get(
+            "schema_version"
+        ) != 1:
+            raise ValueError(
+                "Unsupported CMA-ES checkpoint schema_version: "
+                f"{state.get('schema_version')!r}"
+            )
+
+        if state.get(
+            "optimizer"
+        ) != "cmaes":
+            raise ValueError(
+                "Checkpoint optimizer mismatch: expected "
+                f"'cmaes', got {state.get('optimizer')!r}"
+            )
+
+        # --------------------------------------------------------
+        # pycma compatibility
+        # --------------------------------------------------------
+
+        checkpoint_cma_version = state.get(
+            "cma_version"
+        )
+
+        current_cma_version = str(
+            getattr(
+                cma,
+                "__version__",
+                "",
+            )
+        ).strip()
+
+        if (
+            not isinstance(
+                checkpoint_cma_version,
+                str,
+            )
+            or not checkpoint_cma_version
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint is missing cma_version"
+            )
+
+        if (
+            checkpoint_cma_version
+            != current_cma_version
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint cma package version mismatch: "
+                f"checkpoint={checkpoint_cma_version!r}, "
+                f"current={current_cma_version!r}"
+            )
+
+        # --------------------------------------------------------
+        # Configuration
+        # --------------------------------------------------------
+
+        configuration = state.get(
+            "configuration"
+        )
+
+        if not isinstance(
+            configuration,
+            dict,
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint is missing configuration"
+            )
+
+        checkpoint_batch_size = configuration.get(
+            "batch_size"
+        )
+
+        checkpoint_population_size = configuration.get(
+            "population_size"
+        )
+
+        if (
+            isinstance(
+                checkpoint_batch_size,
+                bool,
+            )
+            or not isinstance(
+                checkpoint_batch_size,
+                int,
+            )
+            or checkpoint_batch_size < 2
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint batch_size "
+                "must be an integer >= 2"
+            )
+
+        if (
+            checkpoint_population_size
+            != checkpoint_batch_size
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint population_size "
+                "must equal batch_size"
+            )
+
+        if (
+            self.batch_size is not None
+            and self.batch_size
+            != checkpoint_batch_size
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint batch_size mismatch: "
+                f"checkpoint={checkpoint_batch_size!r}, "
+                f"current={self.batch_size!r}"
+            )
+
+        if (
+            self.population_size is not None
+            and self.population_size
+            != checkpoint_population_size
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint population_size mismatch"
+            )
+
+        checkpoint_sigma0 = configuration.get(
+            "sigma0"
+        )
+
+        checkpoint_max_generations = configuration.get(
+            "max_generations"
+        )
+
+        checkpoint_seed = configuration.get(
+            "seed"
+        )
+
+        if (
+            checkpoint_sigma0
+            != self.sigma0
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint sigma0 mismatch: "
+                f"checkpoint={checkpoint_sigma0!r}, "
+                f"current={self.sigma0!r}"
+            )
+
+        if (
+            checkpoint_max_generations
+            != self.max_generations
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint max_generations mismatch: "
+                f"checkpoint={checkpoint_max_generations!r}, "
+                f"current={self.max_generations!r}"
+            )
+
+        if checkpoint_seed != self.seed:
+            raise ValueError(
+                "CMA-ES checkpoint seed mismatch: "
+                f"checkpoint={checkpoint_seed!r}, "
+                f"current={self.seed!r}"
+            )
+
+        # --------------------------------------------------------
+        # General wrapper state
+        # --------------------------------------------------------
+
+        if state.get(
+            "initialized"
+        ) is not True:
+            raise ValueError(
+                "CMA-ES checkpoint must contain initialized=True"
+            )
+
+        generation = state.get(
+            "generation"
+        )
+
+        if (
+            isinstance(
+                generation,
+                bool,
+            )
+            or not isinstance(
+                generation,
+                int,
+            )
+            or generation < 1
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint generation "
+                "must be an integer >= 1"
+            )
+
+        direction = state.get(
+            "direction"
+        )
+
+        if direction not in {
+            "minimize",
+            "maximize",
+        }:
+            raise ValueError(
+                "CMA-ES checkpoint direction must be "
+                "'minimize' or 'maximize'"
+            )
+
+        last_xs = state.get(
+            "last_xs"
+        )
+
+        if (
+            not isinstance(
+                last_xs,
+                list,
+            )
+            or last_xs
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint must represent "
+                "a complete-generation boundary"
+            )
+
+        # --------------------------------------------------------
+        # Parameter metadata
+        # --------------------------------------------------------
+
+        param_names = state.get(
+            "param_names"
+        )
+
+        if (
+            not isinstance(
+                param_names,
+                list,
+            )
+            or not param_names
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint param_names "
+                "must be a non-empty list"
+            )
+
+        if (
+            not all(
+                isinstance(name, str)
+                and bool(name)
+                for name in param_names
+            )
+            or len(
+                set(param_names)
+            )
+            != len(param_names)
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint contains "
+                "invalid parameter names"
+            )
+
+        param_specs_raw = state.get(
+            "param_specs"
+        )
+
+        if not isinstance(
+            param_specs_raw,
+            dict,
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint param_specs "
+                "must be a dictionary"
+            )
+
+        if (
+            set(param_specs_raw)
+            != set(param_names)
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint param_specs keys "
+                "do not match param_names"
+            )
+
+        param_specs: Dict[
+            str,
+            Tuple[
+                str,
+                Tuple[float, float],
+            ],
+        ] = {}
+
+        for name in param_names:
+
+            spec = param_specs_raw[
+                name
+            ]
+
+            if (
+                not isinstance(
+                    spec,
+                    (tuple, list),
+                )
+                or len(spec) != 2
+                or spec[0]
+                not in {
+                    "real",
+                    "int",
+                }
+                or not isinstance(
+                    spec[1],
+                    (tuple, list),
+                )
+                or len(spec[1]) != 2
+            ):
+                raise ValueError(
+                    "Invalid CMA-ES parameter specification "
+                    f"for {name!r}"
+                )
+
+            kind = str(
+                spec[0]
+            )
+
+            try:
+                lo = float(
+                    spec[1][0]
+                )
+                hi = float(
+                    spec[1][1]
+                )
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise ValueError(
+                    "Invalid CMA-ES parameter bounds "
+                    f"for {name!r}"
+                ) from exc
+
+            if (
+                not math.isfinite(lo)
+                or not math.isfinite(hi)
+            ):
+                raise ValueError(
+                    "CMA-ES checkpoint bounds "
+                    "must be finite"
+                )
+
+            if (
+                kind == "real"
+                and not lo < hi
+            ):
+                raise ValueError(
+                    "Invalid CMA-ES real bounds "
+                    f"for {name!r}"
+                )
+
+            if (
+                kind == "int"
+                and lo > hi
+            ):
+                raise ValueError(
+                    "Invalid CMA-ES integer bounds "
+                    f"for {name!r}"
+                )
+
+            param_specs[
+                name
+            ] = (
+                kind,
+                (
+                    lo,
+                    hi,
+                ),
+            )
+
+        # --------------------------------------------------------
+        # Best-so-far
+        # --------------------------------------------------------
+
+        best_score_raw = state.get(
+            "best_score"
+        )
+
+        if best_score_raw is None:
+            best_score = None
+        else:
+            try:
+                best_score = float(
+                    best_score_raw
+                )
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise ValueError(
+                    "CMA-ES checkpoint best_score "
+                    "must be numeric or None"
+                ) from exc
+
+            if not math.isfinite(
+                best_score
+            ):
+                raise ValueError(
+                    "CMA-ES checkpoint best_score "
+                    "must be finite"
+                )
+
+        best_candidate_raw = state.get(
+            "best_candidate"
+        )
+
+        if best_candidate_raw is None:
+            best_candidate = None
+
+        elif isinstance(
+            best_candidate_raw,
+            dict,
+        ):
+            best_candidate = dict(
+                best_candidate_raw
+            )
+
+        else:
+            raise ValueError(
+                "CMA-ES checkpoint best_candidate "
+                "must be a dictionary or None"
+            )
+
+        if (
+            (best_score is None)
+            != (best_candidate is None)
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint best_score and "
+                "best_candidate must both exist or both be None"
+            )
+
+        # --------------------------------------------------------
+        # Diagnostics
+        # --------------------------------------------------------
+
+        diagnostics = state.get(
+            "diagnostics"
+        )
+
+        if not isinstance(
+            diagnostics,
+            dict,
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint diagnostics "
+                "must be a dictionary"
+            )
+
+        diagnostic_values: Dict[
+            str,
+            int,
+        ] = {}
+
+        for name in (
+            "n_status_failed",
+            "n_missing_score",
+            "n_non_numeric",
+            "n_non_finite",
+        ):
+
+            value = diagnostics.get(
+                name
+            )
+
+            if (
+                isinstance(
+                    value,
+                    bool,
+                )
+                or not isinstance(
+                    value,
+                    int,
+                )
+                or value < 0
+            ):
+                raise ValueError(
+                    "CMA-ES checkpoint diagnostic "
+                    f"{name!r} must be a "
+                    "non-negative integer"
+                )
+
+            diagnostic_values[
+                name
+            ] = value
+
+        # --------------------------------------------------------
+        # Opaque pycma state
+        # --------------------------------------------------------
+
+        es_pickle = state.get(
+            "es_pickle"
+        )
+
+        if (
+            not isinstance(
+                es_pickle,
+                (bytes, bytearray),
+            )
+            or not es_pickle
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint es_pickle "
+                "must contain non-empty bytes"
+            )
+
+        es_countiter = state.get(
+            "es_countiter"
+        )
+
+        es_countevals = state.get(
+            "es_countevals"
+        )
+
+        if (
+            isinstance(
+                es_countiter,
+                bool,
+            )
+            or not isinstance(
+                es_countiter,
+                int,
+            )
+            or es_countiter < 1
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint es_countiter "
+                "must be an integer >= 1"
+            )
+
+        if (
+            isinstance(
+                es_countevals,
+                bool,
+            )
+            or not isinstance(
+                es_countevals,
+                int,
+            )
+            or es_countevals < 0
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint es_countevals "
+                "must be a non-negative integer"
+            )
+
+        if es_countiter != generation:
+            raise ValueError(
+                "CMA-ES checkpoint generation "
+                "does not match es_countiter"
+            )
+
+        try:
+            restored_es = pickle.loads(
+                bytes(es_pickle)
+            )
+        except Exception as exc:
+            raise ValueError(
+                "CMA-ES checkpoint contains "
+                "an invalid internal strategy pickle"
+            ) from exc
+
+        if not isinstance(
+            restored_es,
+            cma.CMAEvolutionStrategy,
+        ):
+            raise ValueError(
+                "CMA-ES checkpoint internal state "
+                "is not CMAEvolutionStrategy"
+            )
+
+        restored_countiter = int(
+            getattr(
+                restored_es,
+                "countiter",
+                -1,
+            )
+        )
+
+        restored_countevals = int(
+            getattr(
+                restored_es,
+                "countevals",
+                -1,
+            )
+        )
+
+        if (
+            restored_countiter
+            != es_countiter
+        ):
+            raise ValueError(
+                "Restored CMA-ES countiter "
+                "does not match checkpoint metadata"
+            )
+
+        if (
+            restored_countevals
+            != es_countevals
+        ):
+            raise ValueError(
+                "Restored CMA-ES countevals "
+                "does not match checkpoint metadata"
+            )
+
+        restored_mean = getattr(
+            restored_es,
+            "mean",
+            None,
+        )
+
+        if (
+            restored_mean is None
+            or len(restored_mean)
+            != len(param_names)
+        ):
+            raise ValueError(
+                "Restored CMA-ES dimensionality "
+                "does not match parameter metadata"
+            )
+
+        # --------------------------------------------------------
+        # Commit fully validated state
+        # --------------------------------------------------------
+
+        self.batch_size = (
+            checkpoint_batch_size
+        )
+
+        self.population_size = (
+            checkpoint_population_size
+        )
+
+        self._initialized = True
+        self._generation = generation
+
+        self._direction = str(
+            direction
+        )
+
+        self._param_names = list(
+            param_names
+        )
+
+        self._param_specs = (
+            param_specs
+        )
+
+        self._es = restored_es
+
+        self._last_xs = []
+
+        self._best_score = (
+            best_score
+        )
+
+        self._best_candidate = (
+            best_candidate
+        )
+
+        self._n_status_failed = (
+            diagnostic_values[
+                "n_status_failed"
+            ]
+        )
+
+        self._n_missing_score = (
+            diagnostic_values[
+                "n_missing_score"
+            ]
+        )
+
+        self._n_non_numeric = (
+            diagnostic_values[
+                "n_non_numeric"
+            ]
+        )
+
+        self._n_non_finite = (
+            diagnostic_values[
+                "n_non_finite"
+            ]
+        )
 
     def is_done(self) -> bool:
         """
