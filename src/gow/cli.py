@@ -14,7 +14,10 @@ import typer
 from gow.candidate_ids import format_attempt_id, format_candidate_id, parse_candidate_id
 from gow.config import load_problem_config
 from gow.layout import candidate_workdir, run_launchers_dir, run_root
-from gow.run import run_local_optimization
+from gow.run import (
+    resume_local_optimization,
+    run_local_optimization,
+)
 from gow.postprocess import archive_generation_workdirs, finalize_generation, merge_runs
 
 app = typer.Typer(help="Generic Optimization Workflow (gow)")
@@ -462,6 +465,61 @@ def run_cmd(
     problem = load_problem_config(config_abs)
     results_path = run_local_optimization(problem, outdir=results_dir, run_id=run_id, archive_generations=archive_generations, delete_archived_workdirs=delete_archived_workdirs)
     typer.echo(f"Results: {results_path}")
+
+
+@commands.command("resume")
+def resume_cmd(
+    config: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to optimization specs (YAML/JSON).",
+    ),
+    outdir: Path | None = typer.Option(
+        None,
+        "--outdir",
+        help="Results directory (<outdir>) containing runs/<run_id>.",
+    ),
+    run_id: str = typer.Option(
+        ...,
+        "--run-id",
+        help="Run id of the paused local optimization to resume.",
+    ),
+    archive_generations: bool = typer.Option(
+        False,
+        "--archive-generations/--no-archive-generations",
+        help="Archive each newly completed generation into a tar.gz.",
+    ),
+    delete_archived_workdirs: bool = typer.Option(
+        False,
+        "--delete-archived-workdirs/--keep-archived-workdirs",
+        help="Delete candidate workdirs after successfully archiving.",
+    ),
+) -> None:
+    """Resume a paused local optimization run from its checkpoint."""
+
+    config_abs = config.expanduser().resolve()
+    results_dir = _resolve_results_dir(
+        config_abs,
+        outdir,
+    )
+
+    problem = load_problem_config(
+        config_abs
+    )
+
+    results_path = resume_local_optimization(
+        problem,
+        outdir=results_dir,
+        run_id=run_id,
+        archive_generations=archive_generations,
+        delete_archived_workdirs=delete_archived_workdirs,
+    )
+
+    typer.echo(
+        f"Results: {results_path}"
+    )
 
 
 @commands.command("info")
