@@ -206,6 +206,21 @@ def run_local_optimization(
             "acor": {
                 "acor",
             },
+            "cmaes": {
+                "cmaes",
+                "cma-es",
+                "covariance_matrix_adaptation",
+            },
+            "cma-es": {
+                "cmaes",
+                "cma-es",
+                "covariance_matrix_adaptation",
+            },
+            "covariance_matrix_adaptation": {
+                "cmaes",
+                "cma-es",
+                "covariance_matrix_adaptation",
+            },
         }
 
         accepted_checkpoint_names = (
@@ -217,7 +232,7 @@ def run_local_optimization(
         if accepted_checkpoint_names is None:
             raise ValueError(
                 "Checkpoint resume is currently supported "
-                "only for Differential Evolution and ACOR"
+                "only for Differential Evolution, ACOR, and CMA-ES"
             )
 
         loaded_checkpoint = checkpoint_store.load()
