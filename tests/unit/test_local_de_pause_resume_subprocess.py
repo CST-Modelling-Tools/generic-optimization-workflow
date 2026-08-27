@@ -99,6 +99,11 @@ def _run_driver(
     assert payload["mode"] == mode
     assert isinstance(payload["pid"], int)
     assert payload["pid"] > 0
+    assert isinstance(
+        payload["process_instance_id"],
+        str,
+    )
+    assert payload["process_instance_id"]
 
     return payload
 
@@ -228,6 +233,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from gow.config import load_problem_config
@@ -277,6 +283,7 @@ def main() -> int:
             {
                 "mode": mode,
                 "pid": os.getpid(),
+                "process_instance_id": uuid.uuid4().hex,
                 "result_path": str(result_path),
             },
             sort_keys=True,
@@ -450,12 +457,15 @@ if __name__ == "__main__":
         repo_root=repo_root,
     )
 
-    # Explicitly prove this was not the same OS process.
+    # Explicitly prove that PAUSE and RESUME came from
+    # different driver invocations. PIDs cannot be used as a
+    # permanent identity because the OS may reuse them after exit.
     assert (
-        resume_process["pid"]
-        != pause_process["pid"]
+        resume_process["process_instance_id"]
+        != pause_process["process_instance_id"]
     )
 
+    # The resume driver is also a real subprocess, not pytest.
     assert (
         resume_process["pid"]
         != os.getpid()
@@ -558,13 +568,20 @@ if __name__ == "__main__":
         == continuous_summary["best"]
     )
 
-    # Continuous process was also separate from both.
+    # Continuous, PAUSE and RESUME are three independent
+    # driver invocations. Use process-instance identity rather
+    # than PID because sequential subprocesses may reuse a PID.
     assert (
-        continuous_process["pid"]
-        != pause_process["pid"]
+        continuous_process["process_instance_id"]
+        != pause_process["process_instance_id"]
     )
 
     assert (
-        continuous_process["pid"]
-        != resume_process["pid"]
+        continuous_process["process_instance_id"]
+        != resume_process["process_instance_id"]
+    )
+
+    assert (
+        pause_process["process_instance_id"]
+        != resume_process["process_instance_id"]
     )
