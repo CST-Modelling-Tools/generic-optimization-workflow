@@ -1,9 +1,11 @@
 # src/gow/cli.py
 from __future__ import annotations
 
+import hashlib
 import json
-import time
 import os
+import sys
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -59,6 +61,91 @@ def _resolve_results_dir(config: Path, outdir: Path | None) -> Path:
         return Path(env).expanduser().resolve()
 
     return config.expanduser().resolve().parent / "results"
+
+
+def _write_run_context(
+    *,
+    results_path: Path,
+    config_path: Path,
+    results_dir: Path,
+) -> Path:
+    """Persist the minimum external contract required to resume a CLI run.
+
+    This metadata is intentionally separate from the optimizer checkpoint.
+    It records how the run was launched without coupling the checkpoint
+    implementation to CLI or Monitor concerns.
+    """
+
+    results_path = (
+        Path(results_path)
+        .expanduser()
+        .resolve()
+    )
+
+    config_path = (
+        Path(config_path)
+        .expanduser()
+        .resolve()
+    )
+
+    results_dir = (
+        Path(results_dir)
+        .expanduser()
+        .resolve()
+    )
+
+    run_root_dir = results_path.parent
+
+    run_root_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    context_path = (
+        run_root_dir
+        / "run_context.json"
+    )
+
+    temporary_path = (
+        run_root_dir
+        / ".run_context.json.tmp"
+    )
+
+    payload = {
+        "schema_version": 1,
+        "run_id": run_root_dir.name,
+        "config_path": str(config_path),
+        "config_sha256": hashlib.sha256(
+            config_path.read_bytes()
+        ).hexdigest(),
+        "python_executable": str(
+            Path(sys.executable).resolve()
+        ),
+        "results_dir": str(results_dir),
+    }
+
+    try:
+        temporary_path.write_text(
+            json.dumps(
+                payload,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        os.replace(
+            temporary_path,
+            context_path,
+        )
+
+    finally:
+        temporary_path.unlink(
+            missing_ok=True
+        )
+
+    return context_path
 
 
 def _parse_kv_params(items: list[str]) -> dict[str, Any]:
@@ -463,7 +550,21 @@ def run_cmd(
     archive_generations = _coerce_bool_option(archive_generations, False)
     delete_archived_workdirs = _coerce_bool_option(delete_archived_workdirs, False)
     problem = load_problem_config(config_abs)
-    results_path = run_local_optimization(problem, outdir=results_dir, run_id=run_id, archive_generations=archive_generations, delete_archived_workdirs=delete_archived_workdirs)
+
+    results_path = run_local_optimization(
+        problem,
+        outdir=results_dir,
+        run_id=run_id,
+        archive_generations=archive_generations,
+        delete_archived_workdirs=delete_archived_workdirs,
+    )
+
+    _write_run_context(
+        results_path=results_path,
+        config_path=config_abs,
+        results_dir=results_dir,
+    )
+
     typer.echo(f"Results: {results_path}")
 
 
